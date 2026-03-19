@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Undo2, Trash2, X, Check } from "lucide-react";
+import { Undo2, Trash2, X, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const COLORS = [
@@ -15,8 +15,7 @@ const COLORS = [
 const BAR_HEIGHT = 44;
 const OFFSET = 16;
 const MIN_THROW_SPEED = 800; // px/s — needs a real flick to trigger directional throw
-const MOON_GRAVITY = 80; // px/s² — gentle arc
-const FLIGHT_DURATION = 400; // ms
+const FLIGHT_DURATION = 350; // ms
 
 export type Corner = "lb" | "rb" | "lt" | "rt";
 
@@ -31,6 +30,68 @@ interface PenseatBarProps {
   onClear: () => void;
   onDone: () => void;
   capturing: boolean;
+}
+
+function ColorDots({ colors, active, onChange }: { colors: typeof COLORS; active: string; onChange: (c: string) => void }) {
+  return (
+    <div className="flex items-center gap-1.5 px-3 shrink-0">
+      {colors.map((c) => (
+        <div
+          key={c.value}
+          role="button"
+          tabIndex={0}
+          aria-label={c.name}
+          onClick={() => onChange(c.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onChange(c.value); }}
+          className="size-5 rounded-full cursor-pointer transition-transform hover:scale-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/50 shrink-0"
+          style={{
+            backgroundColor: c.value,
+            boxShadow: active === c.value ? `0 0 0 2px #18181b, 0 0 0 3px ${c.value}` : "none",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function Actions({ onUndo, onClear }: { onUndo: () => void; onClear: () => void }) {
+  return (
+    <div className="flex items-center gap-1 px-1 animate-in fade-in duration-200">
+      <Button variant="ghost" size="icon" aria-label="Undo" className="size-8 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 shrink-0" onClick={onUndo}>
+        <Undo2 className="size-4" />
+      </Button>
+      <Button variant="ghost" size="icon" aria-label="Clear all" className="size-8 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 shrink-0" onClick={onClear}>
+        <Trash2 className="size-4" />
+      </Button>
+    </div>
+  );
+}
+
+function CloseBtn({ onClick }: { onClick: () => void }) {
+  return (
+    <Button variant="ghost" size="icon" aria-label="Cancel" className="text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 shrink-0 rounded-full animate-in fade-in duration-200" style={{ width: BAR_HEIGHT, height: BAR_HEIGHT }} onClick={onClick}>
+      <X className="size-4" />
+    </Button>
+  );
+}
+
+function DoneBtn({ onClick, disabled, capturing }: { onClick: () => void; disabled: boolean; capturing: boolean }) {
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label="Done"
+      className="size-8 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 disabled:opacity-50 shrink-0 animate-in fade-in duration-200"
+    >
+      {capturing ? (
+        <span className="size-3 animate-spin rounded-full border-2 border-zinc-400/30 border-t-zinc-400" />
+      ) : (
+        <Copy className="size-4" />
+      )}
+    </Button>
+  );
 }
 
 // Clamp center position so the full button stays inside the viewport
@@ -73,13 +134,26 @@ function expandsRight(corner: Corner) {
   return corner === "lb" || corner === "lt";
 }
 
-// Determine target corner from velocity direction
-function cornerFromVelocity(vx: number, vy: number): Corner {
-  const goLeft = vx < 0;
-  const goUp = vy < 0;
-  return goUp
-    ? goLeft ? "lt" : "rt"
-    : goLeft ? "lb" : "rb";
+// Pick the corner most aligned with the drag direction from current position
+function cornerFromDirection(fromX: number, fromY: number, dx: number, dy: number): Corner {
+  const dragAngle = Math.atan2(dy, dx);
+  let best: Corner = "rb";
+  let bestDot = -Infinity;
+
+  for (const c of CORNERS) {
+    const cc = cornerCenter(c);
+    const toX = cc.x - fromX;
+    const toY = cc.y - fromY;
+    const dist = Math.hypot(toX, toY);
+    if (dist < 1) continue; // already at this corner
+    // Dot product of normalized vectors = cos(angle between)
+    const dot = (dx * toX + dy * toY) / (Math.hypot(dx, dy) * dist);
+    if (dot > bestDot) {
+      bestDot = dot;
+      best = c;
+    }
+  }
+  return best;
 }
 
 // All 4 corners
@@ -146,26 +220,25 @@ export default function PenseatBar({
         const cy = clamped.y;
         setDragPos({ x: cx, y: cy });
 
-        // Track velocity history (keep last 80ms of samples)
+        // Track movement history (keep last 200ms for direction)
         const now = performance.now();
         historyRef.current.push({ x: ev.clientX, y: ev.clientY, t: now });
-        // Prune older than 80ms
-        while (historyRef.current.length > 2 && now - historyRef.current[0].t > 80) {
+        while (historyRef.current.length > 2 && now - historyRef.current[0].t > 200) {
           historyRef.current.shift();
         }
 
-        // Compute velocity for preview (need at least 16ms of data)
+        // Direction = displacement over the last 200ms window
         const h = historyRef.current;
         if (h.length >= 2) {
           const oldest = h[0];
           const newest = h[h.length - 1];
           const dt = (newest.t - oldest.t) / 1000;
           if (dt > 0.016) {
-            const vx = (newest.x - oldest.x) / dt;
-            const vy = (newest.y - oldest.y) / dt;
-            const speed = Math.hypot(vx, vy);
+            const dx = newest.x - oldest.x;
+            const dy = newest.y - oldest.y;
+            const speed = Math.hypot(dx, dy) / dt;
             if (speed > MIN_THROW_SPEED) {
-              setTargetPreview(cornerFromVelocity(vx, vy));
+              setTargetPreview(cornerFromDirection(cx, cy, dx, dy));
             } else {
               setTargetPreview(null);
             }
@@ -185,26 +258,26 @@ export default function PenseatBar({
       wasDragRef.current = true;
       requestAnimationFrame(() => { wasDragRef.current = false; });
 
-      // Compute release velocity
+      // Compute release direction from displacement over 200ms window
       const h = historyRef.current;
-      let vx = 0, vy = 0, speed = 0;
+      let dx = 0, dy = 0, speed = 0;
       if (h.length >= 2) {
         const oldest = h[0];
         const newest = h[h.length - 1];
         const dt = (newest.t - oldest.t) / 1000;
         if (dt > 0.016) {
-          vx = (newest.x - oldest.x) / dt;
-          vy = (newest.y - oldest.y) / dt;
-          speed = Math.hypot(vx, vy);
+          dx = newest.x - oldest.x;
+          dy = newest.y - oldest.y;
+          speed = Math.hypot(dx, dy) / dt;
         }
       }
 
-      // Determine target
+      // Determine target from movement direction
       const releaseX = ev.clientX - offsetX;
       const releaseY = ev.clientY - offsetY;
       const isThrow = speed > MIN_THROW_SPEED;
       const target = isThrow
-        ? cornerFromVelocity(vx, vy)
+        ? cornerFromDirection(releaseX, releaseY, dx, dy)
         : closestCorner(releaseX, releaseY);
 
       // Low velocity: just snap back with CSS transition (straight line)
@@ -213,32 +286,19 @@ export default function PenseatBar({
         return;
       }
 
-      // Fast throw: fly to target with moon-gravity arc
+      // Fast throw: straight line flight with ease-out
       const dest = cornerCenter(target);
-      const startPos = { x: releaseX, y: releaseY };
+      const startPos = clampCenter(releaseX, releaseY);
       const startTime = performance.now();
-
-      // Perpendicular offset for arc (moon gravity feel)
-      const dx = dest.x - startPos.x;
-      const dy = dest.y - startPos.y;
-      const dist = Math.hypot(dx, dy);
-      // Arc height proportional to distance, gravity determines curvature
-      const arcHeight = Math.min(dist * 0.15, MOON_GRAVITY);
-      // Perpendicular direction (rotate 90°)
-      const perpX = -dy / (dist || 1);
-      const perpY = dx / (dist || 1);
 
       function animateFlight() {
         const now = performance.now();
         const elapsed = now - startTime;
         const t = Math.min(elapsed / FLIGHT_DURATION, 1);
-        // Ease out cubic
-        const ease = 1 - Math.pow(1 - t, 3);
-        // Parabolic arc: peaks at t=0.5
-        const arc = 4 * t * (1 - t) * arcHeight;
+        const ease = 1 - Math.pow(1 - t, 3); // ease-out cubic
 
-        const rawX = startPos.x + (dest.x - startPos.x) * ease + perpX * arc;
-        const rawY = startPos.y + (dest.y - startPos.y) * ease + perpY * arc;
+        const rawX = startPos.x + (dest.x - startPos.x) * ease;
+        const rawY = startPos.y + (dest.y - startPos.y) * ease;
         const clamped = clampCenter(rawX, rawY);
 
         setFlyPos(clamped);
@@ -264,17 +324,28 @@ export default function PenseatBar({
   }, []);
 
   // Position: flying > dragging > corner
-  let posStyle: { left: string; top: string };
+  // When expanded on right side, anchor from right edge so it grows left
+  const isRight = corner === "rb" || corner === "rt";
+  const isTop = corner === "lt" || corner === "rt";
+  let posStyle: Record<string, string> = {};
+
   if (isFlying) {
     posStyle = { left: `${flyPos.x - BAR_HEIGHT / 2}px`, top: `${flyPos.y - BAR_HEIGHT / 2}px` };
   } else if (isDragging) {
     posStyle = { left: `${dragPos.x - BAR_HEIGHT / 2}px`, top: `${dragPos.y - BAR_HEIGHT / 2}px` };
+  } else if (expanded) {
+    // Expanded: anchor from the corner edge so toolbar grows inward
+    posStyle = {
+      top: isTop ? `${OFFSET}px` : `calc(100% - ${OFFSET}px - ${BAR_HEIGHT}px)`,
+      ...(isRight
+        ? { right: `${OFFSET}px`, left: "auto" }
+        : { left: `${OFFSET}px`, right: "auto" }),
+    };
   } else {
     posStyle = getPositionStyle(corner);
   }
 
   const rightExpand = expandsRight(corner);
-  const flexDir = rightExpand ? "flex-row" : "flex-row-reverse";
   const isAnimating = isDragging || isFlying;
 
   // Projectile preview line (clamped to viewport)
@@ -312,7 +383,7 @@ export default function PenseatBar({
 
       <div
         data-penseat="bar"
-        className={`fixed z-[9999] flex items-center overflow-hidden rounded-full bg-zinc-900 border-2 border-zinc-400/40 shadow-[0_0_0_0.5px_rgba(255,255,255,0.06),0_1px_3px_rgba(0,0,0,0.15),inset_0_0.5px_0_rgba(255,255,255,0.06)] ${flexDir} ${isAnimating ? "" : "transition-all duration-300 ease-in-out"} ${isDragging ? "opacity-80 scale-105" : ""} ${isFlying ? "scale-95" : ""}`}
+        className={`fixed z-[9999] flex flex-row items-center overflow-hidden rounded-full bg-zinc-900 border-2 border-zinc-400/40 shadow-[0_0_0_0.5px_rgba(255,255,255,0.06),0_1px_3px_rgba(0,0,0,0.15),inset_0_0.5px_0_rgba(255,255,255,0.06)] ${isAnimating ? "" : "transition-all duration-300 ease-in-out"} ${isDragging ? "opacity-80 scale-105" : ""} ${isFlying ? "scale-95" : ""}`}
         style={{
           ...posStyle,
           height: BAR_HEIGHT,
@@ -332,84 +403,12 @@ export default function PenseatBar({
             </svg>
           </button>
         ) : (
-          <div className="flex items-center gap-1.5 px-3 shrink-0">
-            {COLORS.map((c) => (
-              <div
-                key={c.value}
-                role="button"
-                tabIndex={0}
-                aria-label={c.name}
-                onClick={() => onColorChange(c.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ")
-                    onColorChange(c.value);
-                }}
-                className="size-5 rounded-full cursor-pointer transition-transform hover:scale-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/50 shrink-0"
-                style={{
-                  backgroundColor: c.value,
-                  boxShadow:
-                    color === c.value
-                      ? `0 0 0 2px #18181b, 0 0 0 3px ${c.value}`
-                      : "none",
-                }}
-              />
-            ))}
-          </div>
-        )}
-
-        {expanded && (
-          <div className="flex items-center gap-1 px-2 animate-in fade-in duration-200">
-            <div className="h-5 w-px bg-zinc-700 shrink-0" />
-
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Undo"
-              className="size-8 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 shrink-0"
-              onClick={onUndo}
-            >
-              <Undo2 className="size-4" />
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Clear all"
-              className="size-8 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 shrink-0"
-              onClick={onClear}
-            >
-              <Trash2 className="size-4" />
-            </Button>
-
-            <div className="h-5 w-px bg-zinc-700 shrink-0" />
-
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Cancel"
-              className="size-8 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 shrink-0"
-              onClick={onToggle}
-            >
-              <X className="size-4" />
-            </Button>
-
-            <Button
-              onClick={onDone}
-              disabled={capturing}
-              className="h-7 rounded-lg bg-emerald-600 px-3 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50 shrink-0"
-            >
-              {capturing ? (
-                <span className="flex items-center gap-1.5">
-                  <span className="size-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                </span>
-              ) : (
-                <span className="flex items-center gap-1.5">
-                  <Check className="size-3.5" />
-                  Done
-                </span>
-              )}
-            </Button>
-          </div>
+          <>
+            <ColorDots colors={COLORS} active={color} onChange={onColorChange} />
+            <Actions onUndo={onUndo} onClear={onClear} />
+            <DoneBtn onClick={onDone} disabled={capturing} capturing={capturing} />
+            <CloseBtn onClick={onToggle} />
+          </>
         )}
       </div>
     </>

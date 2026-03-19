@@ -63,6 +63,10 @@ export default function Penseat() {
       if (e.key === "Escape" && mode === "drawing") {
         toggle();
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === "z" && mode === "drawing") {
+        e.preventDefault();
+        canvasRef.current?.undo();
+      }
     }
 
     window.addEventListener("keydown", handleKeyDown);
