@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { toast } from "sonner";
 import DrawingCanvas, { type DrawingCanvasHandle } from "./drawing-canvas";
-import PenseatBar from "./penseat-bar";
+import PenseatBar, { type Corner } from "./penseat-bar";
 import { captureAndCopy } from "@/lib/capture";
 
 type Mode = "idle" | "drawing" | "capturing";
@@ -12,6 +12,7 @@ export default function Penseat() {
   const [mode, setMode] = useState<Mode>("idle");
   const [color, setColor] = useState("#ef4444");
   const [promptText, setPromptText] = useState("");
+  const [corner, setCorner] = useState<Corner>("rb");
   const canvasRef = useRef<DrawingCanvasHandle>(null);
 
   const toggle = useCallback(() => {
@@ -78,10 +79,10 @@ export default function Penseat() {
 
       <PenseatBar
         expanded={mode !== "idle"}
+        corner={corner}
+        onCornerChange={setCorner}
         color={color}
         onColorChange={setColor}
-        promptText={promptText}
-        onPromptChange={setPromptText}
         onToggle={toggle}
         onUndo={() => canvasRef.current?.undo()}
         onClear={() => canvasRef.current?.clear()}
