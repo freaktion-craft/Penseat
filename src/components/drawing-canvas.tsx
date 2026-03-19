@@ -28,20 +28,26 @@ interface DrawingCanvasProps {
 }
 
 const FIBERS = 5;
+const DRY_DURATION = 1200; // ms per point to fully dry
+const BRIGHT_WET = 1.5;
+const BRIGHT_DRY = 1.0;
+
+// How many points per segment when drawing with per-point brightness
+const SEG_SIZE = 4;
 
 const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
   function DrawingCanvas({ active, color, strokeWidth = 8 }, ref) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    // Offscreen canvas caches all finalized strokes (with filter applied)
     const cacheCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const strokesRef = useRef<Stroke[]>([]);
     const currentStrokeRef = useRef<Stroke | null>(null);
     const isDrawingRef = useRef(false);
-    const rafRef = useRef<number>(0);
+    // Strokes still drying (have points younger than DRY_DURATION)
+    const dryingRef = useRef<Stroke[]>([]);
+    const animRafRef = useRef<number>(0);
     const fpsRef = useRef({ frames: 0, lastTime: performance.now(), fps: 0 });
     const fpsElRef = useRef<HTMLDivElement>(null);
 
-    // Get or create the offscreen cache canvas, synced to main canvas size
     function getCacheCanvas(): HTMLCanvasElement {
       const main = canvasRef.current!;
       if (
@@ -57,7 +63,6 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       return cacheCanvasRef.current;
     }
 
-    // Resize canvas to match full document
     const resizeCanvas = useCallback(() => {
       const canvas = canvasRef.current;
       if (!canvas) return;
@@ -79,13 +84,11 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       canvas.style.width = `${docWidth}px`;
       canvas.style.height = `${docHeight}px`;
 
-      // Invalidate cache and redraw
       cacheCanvasRef.current = null;
       rebuildCache();
       compositeToScreen();
     }, []);
 
-    // Rebuild the offscreen cache from all finalized strokes
     function rebuildCache() {
       const main = canvasRef.current;
       if (!main) return;
@@ -96,73 +99,76 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       ctx.clearRect(0, 0, cache.width, cache.height);
       ctx.scale(dpr, dpr);
       for (const stroke of strokesRef.current) {
-        drawStroke(ctx, stroke);
+        // Only cache strokes not currently drying
+        if (!dryingRef.current.includes(stroke)) {
+          drawStrokeDried(ctx, stroke);
+        }
       }
       ctx.setTransform(1, 0, 0, 1, 0, 0);
     }
 
-    // Append a single stroke to the cache (avoids full rebuild)
     function appendToCache(stroke: Stroke) {
       const cache = getCacheCanvas();
       const ctx = cache.getContext("2d")!;
       const dpr = window.devicePixelRatio || 1;
-
       ctx.scale(dpr, dpr);
-      drawStroke(ctx, stroke);
+      drawStrokeDried(ctx, stroke);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
     }
 
-    // Composite: cache + live stroke → screen
-    function compositeToScreen(liveStroke?: Stroke) {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const ctx = canvas.getContext("2d")!;
-      const dpr = window.devicePixelRatio || 1;
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      // Blit cached strokes
-      const cache = getCacheCanvas();
-      ctx.drawImage(cache, 0, 0);
-
-      // Draw live stroke on top (same filter — consistent look)
-      if (liveStroke && liveStroke.points.length >= 2) {
-        ctx.scale(dpr, dpr);
-        drawStroke(ctx, liveStroke);
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-      }
+    // Draw a fully dried stroke (brightness = 1.0)
+    function drawStrokeDried(ctx: CanvasRenderingContext2D, stroke: Stroke) {
+      drawFiberPath(ctx, stroke, "url(#penseat-marker-filter)");
     }
 
-    // Update FPS counter
-    function updateFps() {
-      const f = fpsRef.current;
-      f.frames++;
-      const now = performance.now();
-      const delta = now - f.lastTime;
-      if (delta >= 500) {
-        f.fps = Math.round((f.frames * 1000) / delta);
-        f.frames = 0;
-        f.lastTime = now;
-        if (fpsElRef.current) {
-          fpsElRef.current.textContent = `${f.fps} fps`;
+    // Draw a stroke with per-point drying brightness
+    function drawStrokeWithDrying(ctx: CanvasRenderingContext2D, stroke: Stroke, now: number) {
+      if (stroke.points.length < 2) return;
+
+      // Split points into segments by similar brightness to batch draws
+      let segStart = 0;
+      while (segStart < stroke.points.length - 1) {
+        const segEnd = Math.min(segStart + SEG_SIZE, stroke.points.length - 1);
+
+        // Brightness based on midpoint time
+        const midIdx = Math.floor((segStart + segEnd) / 2);
+        const age = now - stroke.points[midIdx].time;
+        const t = Math.min(age / DRY_DURATION, 1);
+        const brightness = BRIGHT_WET + (BRIGHT_DRY - BRIGHT_WET) * t;
+
+        // Extract segment (with 1 point overlap for continuity)
+        const segPoints = stroke.points.slice(segStart, segEnd + 1);
+        if (segPoints.length >= 2) {
+          const segStroke: Stroke = {
+            points: segPoints,
+            color: stroke.color,
+            width: stroke.width,
+          };
+
+          const filter =
+            brightness > 1.01
+              ? `url(#penseat-marker-filter) brightness(${brightness.toFixed(2)})`
+              : "url(#penseat-marker-filter)";
+
+          drawFiberPath(ctx, segStroke, filter);
         }
+
+        segStart = segEnd;
       }
     }
 
-    // Draw a single stroke with marker texture
-    // SVG filter always applied — consistent look live and finalized
-    function drawStroke(ctx: CanvasRenderingContext2D, stroke: Stroke) {
+    // Core fiber drawing — shared by dried and drying paths
+    function drawFiberPath(ctx: CanvasRenderingContext2D, stroke: Stroke, filter: string) {
       if (stroke.points.length < 2) return;
 
       ctx.save();
-      ctx.filter = "url(#penseat-marker-filter)";
+      ctx.filter = filter;
 
       const fiberWidth = stroke.width / FIBERS;
 
       for (let f = 0; f < FIBERS; f++) {
         const offset = (f - (FIBERS - 1) / 2) * fiberWidth * 0.8;
 
-        // Edge fibers slightly transparent for soft edges
         ctx.globalAlpha = f === 0 || f === FIBERS - 1 ? 0.7 : 1;
         ctx.strokeStyle = stroke.color;
         ctx.lineCap = "butt";
@@ -204,26 +210,103 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       ctx.restore();
     }
 
-    // Get document-space coordinates from pointer event
-    function getDocCoords(e: PointerEvent): { x: number; y: number } {
-      return {
-        x: e.pageX,
-        y: e.pageY,
-      };
+    // Composite: cache + drying strokes + live stroke → screen
+    function compositeToScreen(now: number) {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d")!;
+      const dpr = window.devicePixelRatio || 1;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 1. Blit cached (fully dried) strokes
+      ctx.drawImage(getCacheCanvas(), 0, 0);
+
+      // 2. Draw drying strokes with per-point brightness
+      for (const stroke of dryingRef.current) {
+        ctx.scale(dpr, dpr);
+        drawStrokeWithDrying(ctx, stroke, now);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+      }
+
+      // 3. Draw live stroke with per-point brightness
+      const live = currentStrokeRef.current;
+      if (live && live.points.length >= 2) {
+        ctx.scale(dpr, dpr);
+        drawStrokeWithDrying(ctx, live, now);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+      }
     }
 
-    // Pointer handlers
+    // Animation loop — runs while there's anything to animate
+    function startAnimLoop() {
+      if (animRafRef.current) return;
+
+      function tick() {
+        const now = performance.now();
+
+        // Check which drying strokes are fully dried
+        const stillDrying: Stroke[] = [];
+        const fullyDried: Stroke[] = [];
+
+        for (const stroke of dryingRef.current) {
+          const oldest = stroke.points[stroke.points.length - 1].time;
+          if (now - oldest >= DRY_DURATION) {
+            fullyDried.push(stroke);
+          } else {
+            stillDrying.push(stroke);
+          }
+        }
+
+        // Commit fully dried strokes to cache
+        for (const stroke of fullyDried) {
+          appendToCache(stroke);
+        }
+        dryingRef.current = stillDrying;
+
+        compositeToScreen(now);
+        updateFps();
+
+        if (stillDrying.length > 0 || isDrawingRef.current) {
+          animRafRef.current = requestAnimationFrame(tick);
+        } else {
+          animRafRef.current = 0;
+        }
+      }
+
+      animRafRef.current = requestAnimationFrame(tick);
+    }
+
+    function updateFps() {
+      const f = fpsRef.current;
+      f.frames++;
+      const now = performance.now();
+      const delta = now - f.lastTime;
+      if (delta >= 500) {
+        f.fps = Math.round((f.frames * 1000) / delta);
+        f.frames = 0;
+        f.lastTime = now;
+        if (fpsElRef.current) {
+          fpsElRef.current.textContent = `${f.fps} fps`;
+        }
+      }
+    }
+
+    function getDocCoords(e: PointerEvent): { x: number; y: number } {
+      return { x: e.pageX, y: e.pageY };
+    }
+
     const handlePointerDown = useCallback(
       (e: PointerEvent) => {
         if (!active) return;
         e.preventDefault();
         isDrawingRef.current = true;
-        const pos = getDocCoords(e);
         currentStrokeRef.current = {
-          points: [{ ...pos, time: Date.now() }],
+          points: [{ ...getDocCoords(e), time: performance.now() }],
           color,
           width: strokeWidth,
         };
+        startAnimLoop();
       },
       [active, color, strokeWidth]
     );
@@ -232,15 +315,9 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       (e: PointerEvent) => {
         if (!isDrawingRef.current || !currentStrokeRef.current) return;
         e.preventDefault();
-        const pos = getDocCoords(e);
-        currentStrokeRef.current.points.push({ ...pos, time: Date.now() });
-
-        // Only composite: cached strokes + live stroke
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = requestAnimationFrame(() => {
-          if (!currentStrokeRef.current) return;
-          compositeToScreen(currentStrokeRef.current);
-          updateFps();
+        currentStrokeRef.current.points.push({
+          ...getDocCoords(e),
+          time: performance.now(),
         });
       },
       []
@@ -252,14 +329,12 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
 
       if (currentStrokeRef.current.points.length >= 2) {
         strokesRef.current = [...strokesRef.current, currentStrokeRef.current];
-        // Append to cache instead of full rebuild
-        appendToCache(currentStrokeRef.current);
+        dryingRef.current = [...dryingRef.current, currentStrokeRef.current];
+        startAnimLoop();
       }
       currentStrokeRef.current = null;
-      compositeToScreen();
     }, []);
 
-    // Attach/detach pointer listeners on the canvas
     useEffect(() => {
       const canvas = canvasRef.current;
       if (!canvas) return;
@@ -279,32 +354,32 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       };
     }, [active, handlePointerDown, handlePointerMove, handlePointerUp]);
 
-    // Resize observer
     useEffect(() => {
       resizeCanvas();
-
       const observer = new ResizeObserver(() => resizeCanvas());
       observer.observe(document.body);
       window.addEventListener("resize", resizeCanvas);
-
       return () => {
         observer.disconnect();
         window.removeEventListener("resize", resizeCanvas);
+        cancelAnimationFrame(animRafRef.current);
       };
     }, [resizeCanvas]);
 
-    // Expose imperative methods
     useImperativeHandle(ref, () => ({
       undo() {
+        const removed = strokesRef.current[strokesRef.current.length - 1];
         strokesRef.current = strokesRef.current.slice(0, -1);
+        dryingRef.current = dryingRef.current.filter((s) => s !== removed);
         rebuildCache();
-        compositeToScreen();
+        compositeToScreen(performance.now());
       },
       clear() {
         strokesRef.current = [];
+        dryingRef.current = [];
         cacheCanvasRef.current = null;
         getCacheCanvas();
-        compositeToScreen();
+        compositeToScreen(performance.now());
       },
       getCanvas() {
         return canvasRef.current;
@@ -316,7 +391,6 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
 
     return (
       <>
-        {/* SVG filter for marker edge texture */}
         <svg width="0" height="0" className="absolute">
           <defs>
             <filter id="penseat-marker-filter" x="-5%" y="-5%" width="110%" height="110%">
