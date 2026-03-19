@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useEffect } from "react";
-import { Pencil, Undo2, Trash2, X, Check } from "lucide-react";
+import { Pen, Undo2, Trash2, X, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const COLORS = [
@@ -60,44 +60,40 @@ export default function PenseatBar({
         width: expanded ? 520 : BAR_HEIGHT,
       }}
     >
-      {/* Left section: always visible — icon + label (collapsed) or colors (expanded) */}
-      <div className="flex items-center shrink-0">
-        {!expanded ? (
-          // Collapsed circle — Next.js devtool style
-          <button
-            data-penseat="trigger"
-            onClick={onToggle}
-            className="flex items-center justify-center w-full h-full text-zinc-400 hover:text-zinc-100 transition-colors"
-          >
-            <Pencil className="size-4" />
-          </button>
-        ) : (
-          // Expanded: color dots
-          <div className="flex items-center gap-1.5 pl-3">
-            {COLORS.map((c) => (
-              <div
-                key={c.value}
-                role="button"
-                tabIndex={0}
-                aria-label={c.name}
-                onClick={() => onColorChange(c.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ")
-                    onColorChange(c.value);
-                }}
-                className="size-5 rounded-full cursor-pointer transition-transform hover:scale-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/50 shrink-0"
-                style={{
-                  backgroundColor: c.value,
-                  boxShadow:
-                    color === c.value
-                      ? `0 0 0 2px #18181b, 0 0 0 3px ${c.value}`
-                      : "none",
-                }}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      {!expanded ? (
+        <button
+          data-penseat="trigger"
+          onClick={onToggle}
+          className="flex items-center justify-center text-zinc-400 hover:text-zinc-100 transition-colors"
+          style={{ width: BAR_HEIGHT, height: BAR_HEIGHT }}
+        >
+          <Pen className="size-5" />
+        </button>
+      ) : (
+        <div className="flex items-center gap-1.5 pl-3 shrink-0">
+          {COLORS.map((c) => (
+            <div
+              key={c.value}
+              role="button"
+              tabIndex={0}
+              aria-label={c.name}
+              onClick={() => onColorChange(c.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ")
+                  onColorChange(c.value);
+              }}
+              className="size-5 rounded-full cursor-pointer transition-transform hover:scale-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/50 shrink-0"
+              style={{
+                backgroundColor: c.value,
+                boxShadow:
+                  color === c.value
+                    ? `0 0 0 2px #18181b, 0 0 0 3px ${c.value}`
+                    : "none",
+              }}
+            />
+          ))}
+        </div>
+      )}
 
       {/* Expanded content */}
       {expanded && (
