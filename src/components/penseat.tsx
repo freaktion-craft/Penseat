@@ -3,8 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { toast } from "sonner";
 import DrawingCanvas, { type DrawingCanvasHandle } from "./drawing-canvas";
-import PenseatToolbar from "./penseat-toolbar";
-import PenseatTrigger from "./penseat-trigger";
+import PenseatBar from "./penseat-bar";
 import { captureAndCopy } from "@/lib/capture";
 
 type Mode = "idle" | "drawing" | "capturing";
@@ -15,22 +14,21 @@ export default function Penseat() {
   const [promptText, setPromptText] = useState("");
   const canvasRef = useRef<DrawingCanvasHandle>(null);
 
-  const enterDrawing = useCallback(() => {
-    setMode("drawing");
-    setPromptText("");
-  }, []);
-
-  const cancel = useCallback(() => {
-    canvasRef.current?.clear();
-    setMode("idle");
-    setPromptText("");
-  }, []);
+  const toggle = useCallback(() => {
+    if (mode === "idle") {
+      setMode("drawing");
+      setPromptText("");
+    } else {
+      canvasRef.current?.clear();
+      setMode("idle");
+      setPromptText("");
+    }
+  }, [mode]);
 
   const handleDone = useCallback(async () => {
     const canvas = canvasRef.current?.getCanvas();
     if (!canvas) return;
 
-    // Need either strokes or text
     if (!canvasRef.current?.hasStrokes() && !promptText.trim()) {
       toast.error("Draw something or add a note first");
       return;
@@ -55,28 +53,20 @@ export default function Penseat() {
     setPromptText("");
   }, [promptText]);
 
-  // Keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      // Cmd+Shift+D to toggle drawing mode
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "d") {
         e.preventDefault();
-        if (mode === "idle") {
-          enterDrawing();
-        } else if (mode === "drawing") {
-          cancel();
-        }
+        toggle();
       }
-
-      // Escape to cancel drawing
       if (e.key === "Escape" && mode === "drawing") {
-        cancel();
+        toggle();
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [mode, enterDrawing, cancel]);
+  }, [mode, toggle]);
 
   return (
     <>
@@ -86,21 +76,18 @@ export default function Penseat() {
         color={color}
       />
 
-      {mode === "idle" && <PenseatTrigger onClick={enterDrawing} />}
-
-      {(mode === "drawing" || mode === "capturing") && (
-        <PenseatToolbar
-          color={color}
-          onColorChange={setColor}
-          promptText={promptText}
-          onPromptChange={setPromptText}
-          onUndo={() => canvasRef.current?.undo()}
-          onClear={() => canvasRef.current?.clear()}
-          onDone={handleDone}
-          onCancel={cancel}
-          capturing={mode === "capturing"}
-        />
-      )}
+      <PenseatBar
+        expanded={mode !== "idle"}
+        color={color}
+        onColorChange={setColor}
+        promptText={promptText}
+        onPromptChange={setPromptText}
+        onToggle={toggle}
+        onUndo={() => canvasRef.current?.undo()}
+        onClear={() => canvasRef.current?.clear()}
+        onDone={handleDone}
+        capturing={mode === "capturing"}
+      />
     </>
   );
 }

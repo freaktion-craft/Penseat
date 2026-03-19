@@ -201,24 +201,49 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       }
     }
 
-    // Core fiber drawing — marker texture from parallel sub-strokes
+    // Helper: trace the main stroke path (no offset)
+    function tracePath(ctx: CanvasRenderingContext2D, points: Stroke["points"]) {
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+
+      for (let i = 1; i < points.length - 1; i++) {
+        const curr = points[i];
+        const next = points[i + 1];
+        const midX = (curr.x + next.x) / 2;
+        const midY = (curr.y + next.y) / 2;
+        ctx.quadraticCurveTo(curr.x, curr.y, midX, midY);
+      }
+
+      ctx.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+    }
+
+    // Core drawing — round-capped base + same-color fiber texture
     function drawFibers(ctx: CanvasRenderingContext2D, stroke: Stroke) {
       if (stroke.points.length < 2) return;
 
       ctx.save();
+
+      // Base stroke — round caps for smooth rounded ends
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = stroke.color;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.lineWidth = stroke.width;
+      tracePath(ctx, stroke.points);
+      ctx.stroke();
+
+      // Fiber gaps — thin transparent lines cut through for streak texture
       const fiberWidth = stroke.width / FIBERS;
+      for (let f = 1; f < FIBERS; f++) {
+        const offset = (f - FIBERS / 2) * fiberWidth;
 
-      for (let f = 0; f < FIBERS; f++) {
-        const offset = (f - (FIBERS - 1) / 2) * fiberWidth * 0.8;
-
-        ctx.globalAlpha = f === 0 || f === FIBERS - 1 ? 0.6 : 1;
-        ctx.strokeStyle = stroke.color;
+        ctx.globalCompositeOperation = "destination-out";
+        ctx.globalAlpha = 0.12;
         ctx.lineCap = "butt";
         ctx.lineJoin = "round";
-        ctx.lineWidth = fiberWidth;
+        ctx.lineWidth = fiberWidth * 0.3;
 
         ctx.beginPath();
-
         const p0 = stroke.points[0];
         const p1 = stroke.points[1];
         const angle0 = Math.atan2(p1.y - p0.y, p1.x - p0.x);
@@ -247,6 +272,7 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
         );
 
         ctx.stroke();
+        ctx.globalCompositeOperation = "source-over";
       }
 
       ctx.restore();
