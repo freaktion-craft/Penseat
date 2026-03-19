@@ -11,7 +11,7 @@ const COLORS = [
   { name: "White", value: "#ffffff" },
 ];
 
-interface BackseatToolbarProps {
+interface PenseatToolbarProps {
   color: string;
   onColorChange: (color: string) => void;
   promptText: string;
@@ -23,7 +23,7 @@ interface BackseatToolbarProps {
   capturing: boolean;
 }
 
-export default function BackseatToolbar({
+export default function PenseatToolbar({
   color,
   onColorChange,
   promptText,
@@ -33,10 +33,10 @@ export default function BackseatToolbar({
   onDone,
   onCancel,
   capturing,
-}: BackseatToolbarProps) {
+}: PenseatToolbarProps) {
   return (
     <div
-      data-backseat="toolbar"
+      data-penseat="toolbar"
       className="fixed top-4 left-1/2 -translate-x-1/2 z-[9999] flex items-center gap-2 rounded-xl bg-zinc-900/95 px-3 py-2 shadow-2xl backdrop-blur-sm border border-zinc-700/50"
     >
       {/* Color dots */}

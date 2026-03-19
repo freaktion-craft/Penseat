@@ -130,7 +130,7 @@ export default function Page() {
             {[
               {
                 step: 1,
-                title: "Click the Backseat button",
+                title: "Click the Penseat button",
                 desc: "Or press Cmd+Shift+D. The drawing canvas activates over your entire page.",
               },
               {
@@ -168,7 +168,7 @@ export default function Page() {
       {/* Footer */}
       <footer className="border-t border-zinc-200 py-8">
         <div className="mx-auto max-w-6xl px-8 text-center text-sm text-zinc-400">
-          Backseat — draw on the web, paste to your LLM
+          Penseat — draw on the web, paste to your LLM
         </div>
       </footer>
     </main>

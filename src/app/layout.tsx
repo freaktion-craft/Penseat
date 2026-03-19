@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import BackseatDriver from "@/components/backseat-driver";
+import Penseat from "@/components/penseat";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Backseat",
+  title: "Penseat",
   description: "Draw on the web, paste to your LLM",
 };
 
@@ -33,7 +33,7 @@ export default function RootLayout({
       <body className="min-h-full flex flex-col">
         <TooltipProvider>
           {children}
-          <BackseatDriver />
+          <Penseat />
           <Toaster position="bottom-center" />
         </TooltipProvider>
       </body>

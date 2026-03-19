@@ -3,13 +3,13 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { toast } from "sonner";
 import DrawingCanvas, { type DrawingCanvasHandle } from "./drawing-canvas";
-import BackseatToolbar from "./backseat-toolbar";
-import BackseatTrigger from "./backseat-trigger";
+import PenseatToolbar from "./penseat-toolbar";
+import PenseatTrigger from "./penseat-trigger";
 import { captureAndCopy } from "@/lib/capture";
 
 type Mode = "idle" | "drawing" | "capturing";
 
-export default function BackseatDriver() {
+export default function Penseat() {
   const [mode, setMode] = useState<Mode>("idle");
   const [color, setColor] = useState("#ef4444");
   const [promptText, setPromptText] = useState("");
@@ -86,10 +86,10 @@ export default function BackseatDriver() {
         color={color}
       />
 
-      {mode === "idle" && <BackseatTrigger onClick={enterDrawing} />}
+      {mode === "idle" && <PenseatTrigger onClick={enterDrawing} />}
 
       {(mode === "drawing" || mode === "capturing") && (
-        <BackseatToolbar
+        <PenseatToolbar
           color={color}
           onColorChange={setColor}
           promptText={promptText}

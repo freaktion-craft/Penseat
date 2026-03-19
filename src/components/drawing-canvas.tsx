@@ -226,7 +226,7 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
     return (
       <canvas
         ref={canvasRef}
-        data-backseat="canvas"
+        data-penseat="canvas"
         className="absolute top-0 left-0"
         style={{
           pointerEvents: active ? "auto" : "none",

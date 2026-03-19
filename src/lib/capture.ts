@@ -50,7 +50,7 @@ async function captureComposite(
     width: window.innerWidth,
     height: window.innerHeight,
     ignoreElements: (el) => {
-      return el.closest("[data-backseat]") !== null;
+      return el.closest("[data-penseat]") !== null;
     },
   });
 
