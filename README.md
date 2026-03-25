@@ -46,7 +46,6 @@ export default function Layout({ children }) {
 ## Features
 
 - Floating toolbar with drag-to-throw physics
-- Wet/dry marker ink simulation
 - 4 colors + eraser
 - Page screenshot with annotations copied to clipboard
 - Keyboard shortcut hints on hover
