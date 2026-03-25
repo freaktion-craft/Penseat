@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef, useEffect, createContext, useContext, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Undo2, Trash2, X, Copy, Check } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "./ui/button";
 
 const TOOLTIP_DELAY = 360;
 const TOOLTIP_GAP = 10;

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import Penseat from "@/components/penseat";
 import "./globals.css";
@@ -34,7 +33,6 @@ export default function RootLayout({
         <TooltipProvider>
           {children}
           <Penseat />
-          <Toaster position="bottom-center" />
         </TooltipProvider>
       </body>
     </html>

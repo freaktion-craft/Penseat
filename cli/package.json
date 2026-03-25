@@ -1,0 +1,27 @@
+{
+  "name": "penseat",
+  "version": "0.1.0",
+  "description": "Draw on your screen, copy to clipboard. A devtool for annotating and sharing.",
+  "bin": {
+    "penseat": "./index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "templates/"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nicepenseat/penseat"
+  },
+  "keywords": [
+    "devtool",
+    "drawing",
+    "annotation",
+    "screenshot",
+    "clipboard",
+    "react",
+    "nextjs"
+  ]
+}
