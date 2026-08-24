@@ -2,8 +2,15 @@
 
 import { useState, useCallback, useRef, useEffect, createContext, useContext, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Undo2, Trash2, X, Copy, Check } from "lucide-react";
-import { Button } from "@/components/ui/button";
+// Inline SVG icons (from Lucide) — zero dependencies
+const iconProps = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+const Undo2Icon = <svg {...iconProps}><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/></svg>;
+const Trash2Icon = <svg {...iconProps}><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>;
+const XIcon = <svg {...iconProps} width={20} height={20}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>;
+const CopyIcon = <svg {...iconProps}><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>;
+const CheckIcon = <svg {...iconProps} strokeWidth={3}><path d="M20 6 9 17l-5-5"/></svg>;
+const CursorIcon = <svg {...iconProps}><path d="M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z"/></svg>;
+const PenToolIcon = <svg {...iconProps}><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg>;
 
 const TOOLTIP_DELAY = 360;
 const TOOLTIP_GAP = 10;
@@ -25,13 +32,26 @@ const CMD_ICON = (
 function Keycap({ children }: { children: ReactNode }) {
   const content = children === "command" ? CMD_ICON : children === "shift" ? SHIFT_ICON : children;
   return (
-    <kbd className="inline-flex items-center justify-center size-5 rounded bg-zinc-700 border border-zinc-600 text-[13px] font-mono leading-none text-zinc-300">
+    <kbd style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: '20px',
+      height: '20px',
+      borderRadius: '4px',
+      backgroundColor: '#3f3f46',
+      border: '1px solid #52525b',
+      fontSize: '13px',
+      fontFamily: 'monospace',
+      lineHeight: 1,
+      color: '#d4d4d8',
+    }}>
       {content}
     </kbd>
   );
 }
 
-function WithTooltip({ label, shortcut, children, pressed }: { label: string; shortcut?: string[]; children: ReactNode; pressed?: boolean }) {
+function WithTooltip({ label, shortcut, children, pressed, forceShow }: { label: string; shortcut?: string[]; children: ReactNode; pressed?: boolean; forceShow?: boolean }) {
   const below = useContext(TooltipBelowCtx);
   const [hoverShow, setHoverShow] = useState(false);
   const [pos, setPos] = useState<{ x: number; top: number; bottom: number } | null>(null);
@@ -44,6 +64,11 @@ function WithTooltip({ label, shortcut, children, pressed }: { label: string; sh
       setPos({ x: rect.left + rect.width / 2, top: rect.top, bottom: rect.bottom });
     }
   }, []);
+
+  // Force-show: compute position on mount when forceShow is true
+  useEffect(() => {
+    if (forceShow) computePos();
+  }, [forceShow, computePos]);
 
   const onEnter = () => {
     timerRef.current = setTimeout(() => {
@@ -61,17 +86,24 @@ function WithTooltip({ label, shortcut, children, pressed }: { label: string; sh
   return (
     <div
       ref={wrapRef}
-      className="flex items-center self-stretch transition-transform duration-100"
-      style={{ transform: pressed ? "scale(0.95)" : undefined }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        alignSelf: 'stretch',
+        transition: 'transform 100ms',
+        transform: pressed ? 'scale(0.95)' : undefined,
+      }}
       onPointerEnter={onEnter}
       onPointerLeave={onLeave}
     >
       {children}
-      {hoverShow && pos && createPortal(
+      {(hoverShow || forceShow) && pos && createPortal(
         <div
           data-penseat="tooltip"
-          className="fixed z-[99999] pointer-events-none"
           style={{
+            position: 'fixed',
+            zIndex: 99999,
+            pointerEvents: 'none',
             left: pos.x,
             top: below ? pos.bottom + TOOLTIP_GAP : pos.top - TOOLTIP_GAP,
             translate: below ? "-50% 0" : "-50% -100%",
@@ -79,10 +111,20 @@ function WithTooltip({ label, shortcut, children, pressed }: { label: string; sh
             animation: below ? "tooltip-in-below 150ms ease-out" : "tooltip-in-above 150ms ease-out",
           }}
         >
-          <div className={`flex items-center gap-2 rounded-lg bg-[#27272A] pl-3 py-1.5 ${shortcut && shortcut.length > 0 ? "pr-1.5" : "pr-3"}`}>
-            <span className="text-xs font-mono text-zinc-200">{label}</span>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            borderRadius: '8px',
+            backgroundColor: '#18181b',
+            paddingLeft: '12px',
+            paddingTop: '6px',
+            paddingBottom: '6px',
+            paddingRight: shortcut && shortcut.length > 0 ? '6px' : '12px',
+          }}>
+            <span style={{ fontSize: '12px', fontFamily: 'monospace', color: '#e4e4e7' }}>{label}</span>
             {shortcut && shortcut.length > 0 && (
-              <div className="flex items-center gap-0.5">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
                 {shortcut.map((key, i) => (
                   <Keycap key={i}>{key}</Keycap>
                 ))}
@@ -119,6 +161,8 @@ interface PenseatBarProps {
   expanded: boolean;
   corner: Corner;
   onCornerChange: (corner: Corner) => void;
+  tool: "pen" | "cursor";
+  onToolChange: (tool: "pen" | "cursor") => void;
   color: string;
   onColorChange: (color: string) => void;
   onToggle: () => void;
@@ -130,16 +174,63 @@ interface PenseatBarProps {
   shake?: boolean;
 }
 
+function ToolBtn({ active, onClick, pressed, icon, label, shortcut }: { active: boolean; onClick: () => void; pressed: boolean; icon: ReactNode; label: string; shortcut?: string[] }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center' }}>
+      <WithTooltip label={label} shortcut={shortcut} pressed={pressed}>
+        <button
+          tabIndex={-1}
+          // Skip the shared hover override when active so the accent color holds
+          {...(active ? {} : { "data-penseat-btn": "" })}
+          aria-label={label}
+          onClick={onClick}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: '32px',
+            height: '32px',
+            flexShrink: 0,
+            cursor: 'pointer',
+            transition: 'all 150ms',
+            transform: pressed ? 'scale(0.9)' : undefined,
+            color: active ? '#f4f4f5' : '#a1a1aa',
+            backgroundColor: active ? 'rgba(63,63,70,1)' : 'rgba(63,63,70,0)',
+            border: 'none',
+            outline: 'none',
+            borderRadius: '6px',
+            padding: 0,
+          }}
+        >
+          {icon}
+        </button>
+      </WithTooltip>
+    </div>
+  );
+}
+
 function EraserDot({ active, onClick }: { active: boolean; onClick: () => void }) {
+  const [hovered, setHovered] = useState(false);
   return (
     <div
       onClick={onClick}
-      className="size-5 rounded-full cursor-pointer transition-transform hover:scale-110 shrink-0 flex items-center justify-center"
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
       style={{
+        width: '20px',
+        height: '20px',
+        borderRadius: '9999px',
+        cursor: 'pointer',
+        transition: 'transform 150ms',
+        transform: hovered ? 'scale(1.1)' : 'scale(1)',
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
         boxShadow: active ? "0 0 0 2px #18181b, 0 0 0 3px #a1a1aa" : "none",
       }}
     >
-      <svg viewBox="0 0 20 20" className="size-5">
+      <svg viewBox="0 0 20 20" style={{ width: '20px', height: '20px' }}>
         <defs>
           <clipPath id="eraser-clip">
             <circle cx="10" cy="10" r="8.5" />
@@ -158,7 +249,7 @@ function EraserDot({ active, onClick }: { active: boolean; onClick: () => void }
 
 function ColorDots({ colors, active, onChange, pressedId }: { colors: typeof COLORS; active: string; onChange: (c: string) => void; pressedId: string | null }) {
   return (
-    <div className="flex items-center gap-2 px-3 shrink-0">
+    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '0 12px', flexShrink: 0 }}>
       {colors.map((c, i) => {
         if (c.name === "Eraser") {
           return (
@@ -168,42 +259,108 @@ function ColorDots({ colors, active, onChange, pressedId }: { colors: typeof COL
           );
         }
         return (
-          <WithTooltip key={c.value} label={c.name} shortcut={[String(i + 1)]} pressed={pressedId === `color-${i + 1}`}>
-            <div
-              onClick={() => onChange(c.value)}
-              className="size-5 rounded-full cursor-pointer transition-transform hover:scale-110 shrink-0"
-              style={{
-                backgroundColor: c.value,
-                boxShadow: active === c.value ? `0 0 0 2px #18181b, 0 0 0 3px ${c.value}` : "none",
-              }}
-            />
-          </WithTooltip>
+          <ColorDot key={c.value} color={c} index={i} active={active === c.value} onChange={onChange} pressedId={pressedId} />
         );
       })}
     </div>
   );
 }
 
-function Actions({ onUndo, onClear, pressedId }: { onUndo: () => void; onClear: () => void; pressedId: string | null }) {
+function ColorDot({ color: c, index: i, active, onChange, pressedId }: { color: typeof COLORS[number]; index: number; active: boolean; onChange: (c: string) => void; pressedId: string | null }) {
+  const [hovered, setHovered] = useState(false);
   return (
-    <div className="flex items-center gap-1 px-1 animate-in fade-in duration-200">
+    <WithTooltip label={c.name} shortcut={[String(i + 1)]} pressed={pressedId === `color-${i + 1}`}>
+      <div
+        onClick={() => onChange(c.value)}
+        onPointerEnter={() => setHovered(true)}
+        onPointerLeave={() => setHovered(false)}
+        style={{
+          width: '20px',
+          height: '20px',
+          borderRadius: '9999px',
+          cursor: 'pointer',
+          transition: 'transform 150ms',
+          transform: hovered ? 'scale(1.1)' : 'scale(1)',
+          flexShrink: 0,
+          backgroundColor: c.value,
+          boxShadow: active ? `0 0 0 2px #18181b, 0 0 0 3px ${c.value}` : "none",
+        }}
+      />
+    </WithTooltip>
+  );
+}
+
+function ActionButton({ icon, ariaLabel, onClick, pressed }: { icon: ReactNode; ariaLabel: string; onClick: () => void; pressed: boolean }) {
+  return (
+    <button
+      tabIndex={-1}
+      data-penseat-btn
+      aria-label={ariaLabel}
+      onClick={onClick}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: '32px',
+        height: '32px',
+        flexShrink: 0,
+        cursor: 'pointer',
+        transition: 'all 150ms',
+        transform: pressed ? 'scale(0.9)' : undefined,
+        color: pressed ? '#f4f4f5' : '#a1a1aa',
+        backgroundColor: pressed ? 'rgba(63,63,70,1)' : 'rgba(63,63,70,0)',
+        border: 'none',
+        outline: 'none',
+        borderRadius: '6px',
+        padding: 0,
+      }}
+    >
+      {icon}
+    </button>
+  );
+}
+
+// Undo lives with the pen's sub-tools; clear-all stays global
+function UndoBtn({ onUndo, pressedId }: { onUndo: () => void; pressedId: string | null }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', paddingRight: '4px' }}>
       <WithTooltip label="Undo" shortcut={["command", "Z"]} pressed={pressedId === "undo"}>
-        <Button tabIndex={-1} variant="ghost" size="icon" aria-label="Undo" className={`size-8 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 shrink-0 cursor-pointer active:scale-[0.9] active:translate-y-0 transition-all ${pressedId === "undo" ? "bg-zinc-800 text-zinc-100" : ""}`} onClick={onUndo}>
-          <Undo2 className="size-4" />
-        </Button>
-      </WithTooltip>
-      <WithTooltip label="Clear all" shortcut={["X"]} pressed={pressedId === "clear"}>
-        <Button tabIndex={-1} variant="ghost" size="icon" aria-label="Clear all" className={`size-8 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 shrink-0 cursor-pointer active:scale-[0.9] active:translate-y-0 transition-all ${pressedId === "clear" ? "bg-zinc-800 text-zinc-100" : ""}`} onClick={onClear}>
-          <Trash2 className="size-4" />
-        </Button>
+        <ActionButton
+          icon={Undo2Icon}
+          ariaLabel="Undo"
+          onClick={onUndo}
+          pressed={pressedId === "undo"}
+        />
       </WithTooltip>
     </div>
   );
 }
 
-const PEN_ICON = (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="size-5" fill="none">
-    <path fillRule="evenodd" clipRule="evenodd" d="M20.1507 2.76256C19.4673 2.07914 18.3593 2.07915 17.6759 2.76256L16.0006 4.43796L16.0001 4.4375L14.9395 5.49816L18.9091 9.46783C19.202 9.76072 19.202 10.2356 18.9091 10.5285L16.9698 12.4678C16.6769 12.7607 16.6769 13.2356 16.9698 13.5285C17.2627 13.8214 17.7375 13.8214 18.0304 13.5285L19.9698 11.5892C20.8485 10.7105 20.8485 9.28585 19.9698 8.40717L19.5612 7.99862L21.2365 6.32322C21.9199 5.63981 21.9199 4.53177 21.2365 3.84835L20.1507 2.76256ZM17.6159 9.94413L14.0552 6.38347L8.49985 11.9392L12.0605 15.4999L17.6159 9.94413ZM3.83613 16.6032L7.43923 12.9999L10.9999 16.5605L7.39683 20.1639C7.06636 20.4943 6.65711 20.7351 6.20775 20.8635L3.20606 21.7211C2.94416 21.796 2.66229 21.7229 2.46969 21.5303C2.27709 21.3377 2.20405 21.0559 2.27888 20.794L3.1365 17.7923C3.26489 17.3429 3.50567 16.9337 3.83613 16.6032Z" fill="currentColor" />
+function Actions({ onClear, pressedId }: { onClear: () => void; pressedId: string | null }) {
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: '4px',
+      padding: '0 4px',
+      opacity: 1,
+    }}>
+      <WithTooltip label="Clear all" shortcut={["X"]} pressed={pressedId === "clear"}>
+        <ActionButton
+          icon={Trash2Icon}
+          ariaLabel="Clear all"
+          onClick={onClear}
+          pressed={pressedId === "clear"}
+        />
+      </WithTooltip>
+    </div>
+  );
+}
+
+// Penseat logo — tinted by the wrapper's color
+const LOGO_ICON = (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" style={{ width: '22px', height: '22px' }} fill="none">
+    <path d="M206.917 39.8401C248.595 21.7799 282.988 25.5116 307.033 43.802C330.035 61.2996 340.023 89.5913 338.984 113.752L338.977 113.915L338.967 114.078C336.525 153.633 304.585 215.748 235.264 226.322C207.544 230.551 178.944 228.285 153.483 223.437C150.701 271.62 154.848 319.864 158.747 351.908C159.915 361.502 153.083 370.226 143.49 371.394C133.896 372.561 125.171 365.731 124.003 356.137C119.84 321.922 115.211 268.433 118.954 214.957C100.21 209.329 84.5221 202.932 74.225 197.825C65.5664 193.531 62.0285 183.031 66.3226 174.372C70.6169 165.714 81.1172 162.176 89.7757 166.47C97.158 170.131 108.676 174.942 122.79 179.496C126.697 153.514 133.202 128.042 143.62 105.681C156.873 77.239 176.971 52.8169 206.917 39.8401ZM285.843 71.6584C274.409 62.9603 254.155 57.515 220.833 71.9543C200.992 80.5521 186.171 97.2286 175.346 120.462C166.27 139.941 160.373 163.307 156.861 188.431C180.481 193.201 206.157 195.358 229.987 191.723C278.568 184.312 302.213 140.043 304.022 112.088C304.596 97.5387 298.274 81.1148 285.843 71.6584Z" fill="currentColor" />
   </svg>
 );
 
@@ -224,18 +381,37 @@ function AnchorIcon({ expanded, onToggle, onPointerDown, wasDragRef, pressed, ri
       data-penseat="trigger"
       onClick={(e) => { (e.currentTarget as HTMLElement).blur(); if (!wasDragRef.current) onToggle(); }}
       onPointerDown={expanded ? undefined : onPointerDown}
-      className="relative flex items-center justify-center shrink-0 cursor-pointer transition-colors [&:hover]:bg-zinc-800 rounded-full"
       style={{
+        position: 'relative',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+        cursor: 'pointer',
+        backgroundColor: 'rgba(63,63,70,0)',
+        borderRadius: '9999px',
+        border: 'none',
+        outline: 'none',
+        padding: 0,
         width: BAR_HEIGHT - 4,
         height: BAR_HEIGHT - 4,
         transform: pressed ? "scale(0.9)" : undefined,
-        transition: "transform 100ms",
+        transition: "transform 100ms, background-color 150ms",
       }}
     >
-      {/* Pen icon — visible when collapsed */}
+      {/* Logo — visible when collapsed */}
       <span
-        className="absolute inset-0 flex items-center justify-center text-white transition-all duration-200 ease-in-out"
         style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#ffffff',
+          transition: 'all 200ms ease-in-out',
           opacity: expanded ? 0 : 1,
           transform: expanded ? "scale(0.5)" : "scale(1)",
           filter: expanded ? "blur(4px)" : "blur(0px)",
@@ -243,12 +419,21 @@ function AnchorIcon({ expanded, onToggle, onPointerDown, wasDragRef, pressed, ri
           transitionDelay: expanded ? "0ms" : "60ms",
         }}
       >
-        {PEN_ICON}
+        {LOGO_ICON}
       </span>
       {/* Close icon — spins in from the toolbar direction */}
       <span
-        className="absolute inset-0 flex items-center justify-center text-zinc-400 transition-all duration-300 ease-in-out"
         style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#a1a1aa',
+          transition: 'all 300ms ease-in-out',
           opacity: expanded ? 1 : 0,
           transform: expanded ? "scale(1) rotate(0deg)" : `scale(0.5) rotate(${-spinDeg}deg)`,
           filter: expanded ? "blur(0px)" : "blur(4px)",
@@ -256,61 +441,121 @@ function AnchorIcon({ expanded, onToggle, onPointerDown, wasDragRef, pressed, ri
           transitionDelay: expanded ? "0ms" : "60ms",
         }}
       >
-        <X className="size-5" />
+        {XIcon}
       </span>
     </button>
   );
 }
 
 function DoneBtn({ onClick, disabled, capturing, copied, pressed, shake }: { onClick: () => void; disabled: boolean; capturing: boolean; copied: boolean; pressed: boolean; shake?: boolean }) {
+  const isDown = pressed && !shake;
   const anim = copied ? "copy-bounce 600ms ease-out" : shake ? "nope-shake 320ms ease-out" : undefined;
   return (
-    <div className="flex items-center self-stretch" style={anim ? { animation: anim } : undefined}>
-      <WithTooltip key={copied ? "copied" : "copy"} label={copied ? "Copied!" : "Copy"} shortcut={copied ? undefined : ["command", "C"]} pressed={pressed}>
-        <Button
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      alignSelf: 'stretch',
+      animation: anim,
+    }}>
+      <WithTooltip label={copied ? "Copied!" : "Copy"} shortcut={copied ? undefined : ["command", "C"]} pressed={pressed} forceShow={copied}>
+        <button
           tabIndex={-1}
-          variant="ghost"
-          size="icon"
+          data-penseat-btn
           onClick={onClick}
           disabled={disabled && !copied}
           aria-label="Done"
-          className={`size-8 shrink-0 animate-in fade-in duration-200 cursor-pointer active:scale-[0.9] active:translate-y-0 transition-all ${
-            copied
-              ? "bg-blue-500 text-white hover:bg-blue-500 hover:text-white"
-              : pressed
-                ? "bg-zinc-800 text-zinc-100"
-                : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800"
-          } disabled:opacity-50`}
-          style={{ borderRadius: copied ? 9999 : undefined }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: '32px',
+            height: '32px',
+            flexShrink: 0,
+            cursor: 'pointer',
+            transition: 'all 200ms',
+            transform: isDown ? 'scale(0.9)' : undefined,
+            border: 'none',
+            outline: 'none',
+            padding: 0,
+            borderRadius: '6px',
+            backgroundColor: isDown ? 'rgba(63,63,70,1)' : 'rgba(63,63,70,0)',
+            color: isDown ? '#f4f4f5' : '#a1a1aa',
+            opacity: (disabled && !copied) ? 0.5 : 1,
+          }}
         >
           {capturing ? (
-            <span className="size-3 animate-spin rounded-full border-2 border-zinc-400/30 border-t-zinc-400" />
+            <span style={{
+              width: '12px',
+              height: '12px',
+              borderRadius: '9999px',
+              border: '2px solid rgba(161,161,170,0.3)',
+              borderTopColor: '#a1a1aa',
+              animation: 'penseat-spin 1s linear infinite',
+            }} />
           ) : (
-            <span className="relative size-4">
-              <Copy className="size-4 absolute inset-0 transition-all duration-200" style={{ opacity: copied ? 0 : 1, transform: copied ? "scale(0.5)" : "scale(1)" }} />
-              <Check className="size-4 absolute inset-0 transition-all duration-200" strokeWidth={3} style={{ opacity: copied ? 1 : 0, transform: copied ? "scale(1)" : "scale(0.5)" }} />
+            <span style={{ position: 'relative', width: '16px', height: '16px' }}>
+              <span style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'all 180ms ease-out',
+                opacity: copied ? 0 : 1,
+                transform: copied ? "scale(0.5)" : "scale(1)",
+              }}>{CopyIcon}</span>
+              <span style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'all 180ms ease-out',
+                opacity: copied ? 1 : 0,
+                transform: copied ? "scale(1)" : "scale(0.5)",
+              }}>{CheckIcon}</span>
             </span>
           )}
-        </Button>
+        </button>
       </WithTooltip>
-      {(shake || copied) && (
-        <style>{`
-          @keyframes nope-shake {
-            0%   { transform: translateX(0); }
-            20%  { transform: translateX(-3px); }
-            50%  { transform: translateX(3px); }
-            80%  { transform: translateX(-2px); }
-            100% { transform: translateX(0); }
-          }
-          @keyframes copy-bounce {
-            0%   { transform: translateY(0); }
-            30%  { transform: translateY(-6px); }
-            50%  { transform: translateY(0); }
-            70%  { transform: translateY(-2px); }
-            100% { transform: translateY(0); }
-          }
-        `}</style>
-      )}
+      {/* Always rendered — these are the shared icon-button hover/active
+          effects, not just the transient copy animations */}
+      <style>{`
+        @keyframes nope-shake {
+          0%   { transform: translateX(0); }
+          20%  { transform: translateX(-3px); }
+          50%  { transform: translateX(3px); }
+          80%  { transform: translateX(-2px); }
+          100% { transform: translateX(0); }
+        }
+        @keyframes copy-bounce {
+          0%   { transform: translateY(0); }
+          30%  { transform: translateY(-6px); }
+          50%  { transform: translateY(0); }
+          70%  { transform: translateY(-2px); }
+          100% { transform: translateY(0); }
+        }
+        @keyframes penseat-spin {
+          from { transform: rotate(0deg); }
+          to   { transform: rotate(360deg); }
+        }
+        [data-penseat-btn]:active {
+          transform: scale(0.9) !important;
+        }
+        [data-penseat-btn]:hover {
+          background-color: rgba(63,63,70,1) !important;
+          color: #f4f4f5 !important;
+        }
+        [data-penseat="trigger"]:hover {
+          background-color: rgba(63,63,70,1) !important;
+        }
+      `}</style>
     </div>
   );
 }
@@ -386,6 +631,8 @@ export default function PenseatBar({
   expanded,
   corner,
   onCornerChange,
+  tool,
+  onToolChange,
   color,
   onColorChange,
   onToggle,
@@ -417,6 +664,7 @@ export default function PenseatBar({
         if (["1", "2", "3", "4"].includes(e.key)) id = `color-${e.key}`;
         else if (e.key === "e" || e.key === "5") id = "eraser";
         else if (e.key === "x") id = "clear";
+        else if (e.key === "v") id = "cursor";
       }
       if (e.key === "Escape") id = "close";
       if (isMeta && e.key === "z") id = "undo";
@@ -459,6 +707,31 @@ export default function PenseatBar({
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
   }, []);
+
+  // Pen tray — the pen's sub-tools float in their own bar next to the
+  // toolbar (above at bottom corners, below at top ones) instead of
+  // stretching the toolbar itself. Anchored off the bar's resting edges,
+  // which stay fixed while the width animates; hidden mid-drag/flight
+  // and re-anchored after the bar lands.
+  const barBodyRef = useRef<HTMLDivElement>(null);
+  const [trayPos, setTrayPos] = useState<{ [k: string]: number } | null>(null);
+  const trayVisible = expanded && tool === "pen" && !isDragging && !isFlying;
+  useEffect(() => {
+    if (!trayVisible) {
+      setTrayPos(null);
+      return;
+    }
+    const r = barBodyRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const atTop = corner === "lt" || corner === "rt";
+    const atRight = corner === "rb" || corner === "rt";
+    setTrayPos({
+      ...(atTop
+        ? { top: r.bottom + 8 }
+        : { bottom: window.innerHeight - r.top + 8 }),
+      ...(atRight ? { right: window.innerWidth - r.right } : { left: r.left }),
+    });
+  }, [trayVisible, corner]);
 
 
   // Track velocity from recent pointer positions
@@ -616,8 +889,17 @@ export default function PenseatBar({
       {isDragging && previewTarget && dragPos && (
         <svg
           data-penseat="projectile"
-          className="fixed inset-0 z-[9998] pointer-events-none"
-          style={{ width: "100%", height: "100%" }}
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 9998,
+            pointerEvents: 'none',
+            width: '100%',
+            height: '100%',
+          }}
         >
           <line
             x1={dragPos.x}
@@ -640,11 +922,55 @@ export default function PenseatBar({
         </svg>
       )}
 
+      {/* Pen tray — the pen's sub-tools in their own floating bar */}
+      {trayVisible && trayPos && (
+        <div
+          data-penseat="pen-tray"
+          style={{
+            position: 'fixed',
+            zIndex: 9999,
+            ...trayPos,
+            display: 'flex',
+            alignItems: 'center',
+            height: BAR_HEIGHT,
+            padding: '0 8px',
+            userSelect: 'none',
+            borderRadius: '14px',
+            backgroundColor: '#18181b',
+            border: '1.5px solid rgba(255,255,255,0.25)',
+            boxShadow: '0 0 0 0.5px rgba(255,255,255,0.06), 0 1px 3px rgba(0,0,0,0.15), inset 0 0.5px 0 rgba(255,255,255,0.06)',
+            animation: 'penseat-tray-in 160ms ease-out',
+          }}
+        >
+          <style>{`@keyframes penseat-tray-in { from { opacity: 0; transform: translateY(${corner === "lt" || corner === "rt" ? -6 : 6}px); } }`}</style>
+          <ColorDots colors={COLORS} active={color} onChange={onColorChange} pressedId={pressedId} />
+          <UndoBtn onUndo={onUndo} pressedId={pressedId} />
+        </div>
+      )}
+
       <div
         data-penseat="bar"
+        ref={barBodyRef}
         onKeyDown={(e) => { if (e.key === " " || e.key === "Enter") e.preventDefault(); }}
-        className={`fixed z-[9999] flex items-center overflow-hidden rounded-full bg-zinc-800 border-[1.5px] border-white/25 shadow-[0_0_0_0.5px_rgba(255,255,255,0.06),0_1px_3px_rgba(0,0,0,0.15),inset_0_0.5px_0_rgba(255,255,255,0.06)] ${isDragging ? "opacity-80 scale-105" : ""} ${isFlying ? "scale-95" : ""}`}
         style={{
+          position: 'fixed',
+          zIndex: 9999,
+          display: 'flex',
+          alignItems: 'center',
+          overflow: 'hidden',
+          userSelect: 'none',
+          // Full round cap on the anchor end only — the content end squares
+          // off (small radius) so the square tool buttons fit un-clipped
+          borderRadius: expanded
+            ? rightExpand
+              ? '22px 14px 14px 22px'
+              : '14px 22px 22px 14px'
+            : '9999px',
+          backgroundColor: '#18181b',
+          border: '1.5px solid rgba(255,255,255,0.25)',
+          boxShadow: '0 0 0 0.5px rgba(255,255,255,0.06), 0 1px 3px rgba(0,0,0,0.15), inset 0 0.5px 0 rgba(255,255,255,0.06)',
+          opacity: isDragging ? 0.8 : 1,
+          transform: isDragging ? 'scale(1.05)' : isFlying ? 'scale(0.95)' : undefined,
           ...posStyle,
           height: BAR_HEIGHT,
           width: expanded ? contentWidth + (BAR_HEIGHT - 4) + 4 : BAR_HEIGHT,
@@ -663,11 +989,22 @@ export default function PenseatBar({
         {/* Toolbar content — always in DOM, revealed/hidden by width animation */}
         <div
           ref={contentRef}
-          className="flex flex-row items-stretch self-stretch shrink-0 pr-2"
-          style={{ pointerEvents: expanded ? "auto" : "none" }}
+          style={{
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'stretch',
+            alignSelf: 'stretch',
+            flexShrink: 0,
+            gap: '4px',
+            // Tighter on the content's outer (squared) end, roomier on the
+            // anchor side — flips with the expand direction
+            padding: rightExpand ? '0 5px 0 8px' : '0 8px 0 5px',
+            pointerEvents: expanded ? 'auto' : 'none',
+          }}
         >
-          <ColorDots colors={COLORS} active={color} onChange={onColorChange} pressedId={pressedId} />
-<Actions onUndo={onUndo} onClear={onClear} pressedId={pressedId} />
+          <ToolBtn icon={PenToolIcon} label="Pen" active={tool === "pen"} onClick={() => onToolChange("pen")} pressed={pressedId === "pen"} />
+          <ToolBtn icon={CursorIcon} label="Inspect element" shortcut={["V"]} active={tool === "cursor"} onClick={() => onToolChange("cursor")} pressed={pressedId === "cursor"} />
+          <Actions onClear={onClear} pressedId={pressedId} />
           <DoneBtn onClick={onDone} disabled={capturing || !!copied} capturing={capturing} copied={!!copied} pressed={pressedId === "copy"} shake={shake} />
         </div>
       </div>
