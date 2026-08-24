@@ -26,59 +26,24 @@ interface DrawingCanvasProps {
   active: boolean;
   color: string;
   strokeWidth?: number;
+  // Cursor tool active: keep ink visible but pass pointer input through
+  penDisabled?: boolean;
 }
 
 // ── Constants ──
 const FIBERS = 5;
-const DRY_DURATION = 1200;
 const DRY_ALPHA = 1.0;            // fully opaque settled marker
-const WET_OVERLAY_ALPHA = 0.50;   // extra density at peak wetness
-const WET_WIDTH_BOOST = 0.12;     // 12% wider when wet
-const WET_COLOR_DARKEN = 0.10;    // 10% darker when wet
 const FIBER_CUT_ALPHA = 0;         // fiber streaks disabled
 const ERASER_COLOR = "#ffffff";
 const ERASER_RADIUS = 12;
 
-// Wetness band edges — 0 = fully dry, 1 = freshest
-const WETNESS_BANDS = [0.00, 0.18, 0.40, 0.68, 0.88, 1.00];
-
-// ── Helpers (outside component — no allocations per render) ──
-
-// Smoothstep wetness: 1 = just drawn, 0 = fully dry
-function wetness(pointTime: number, now: number): number {
-  const x = 1 - (now - pointTime) / DRY_DURATION;
-  const c = x < 0 ? 0 : x > 1 ? 1 : x;
-  return c * c * (3 - 2 * c);
-}
-
-// Darken hex color by factor (0 = original, 1 = WET_COLOR_DARKEN% darker)
-function darkenHex(hex: string, factor: number): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  const f = 1 - factor * WET_COLOR_DARKEN;
-  return `rgb(${Math.round(r * f)},${Math.round(g * f)},${Math.round(b * f)})`;
-}
-
-// Binary search: first index where points[i].time >= t
-function lowerBound(points: { time: number }[], t: number): number {
-  let lo = 0, hi = points.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (points[mid].time < t) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
 const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
-  function DrawingCanvas({ active, color, strokeWidth = 5 }, ref) {
+  function DrawingCanvas({ active, color, strokeWidth = 5, penDisabled = false }, ref) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const cacheCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const strokesRef = useRef<Stroke[]>([]);
     const currentStrokeRef = useRef<Stroke | null>(null);
     const isDrawingRef = useRef(false);
-    const dryingRef = useRef<Stroke[]>([]);
     const animRafRef = useRef<number>(0);
     const eraserCursorRef = useRef<HTMLDivElement>(null);
     const tmpCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -137,7 +102,7 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       cacheCanvasRef.current = null;
       tmpCanvasRef.current = null;
       rebuildCache();
-      compositeToScreen(performance.now());
+      compositeToScreen();
     }, []);
 
     // ── Path tracing ──
@@ -214,18 +179,22 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       tracePath(ctx, points);
       ctx.stroke();
 
-      // Fiber gaps — thin transparent lines cut through for streak texture
-      const fiberWidth = w / FIBERS;
-      for (let f = 1; f < FIBERS; f++) {
-        const offset = (f - FIBERS / 2) * fiberWidth;
-        ctx.globalCompositeOperation = "destination-out";
-        ctx.globalAlpha = FIBER_CUT_ALPHA;
-        ctx.lineCap = "butt";
-        ctx.lineJoin = "round";
-        ctx.lineWidth = fiberWidth * 0.3;
-        traceOffsetPath(ctx, points, offset);
-        ctx.stroke();
-        ctx.globalCompositeOperation = "source-over";
+      // Fiber gaps — thin transparent lines cut through for streak texture.
+      // Skipped entirely while disabled: zero-alpha strokes still cost a
+      // full rasterization pass each
+      if (FIBER_CUT_ALPHA > 0) {
+        const fiberWidth = w / FIBERS;
+        for (let f = 1; f < FIBERS; f++) {
+          const offset = (f - FIBERS / 2) * fiberWidth;
+          ctx.globalCompositeOperation = "destination-out";
+          ctx.globalAlpha = FIBER_CUT_ALPHA;
+          ctx.lineCap = "butt";
+          ctx.lineJoin = "round";
+          ctx.lineWidth = fiberWidth * 0.3;
+          traceOffsetPath(ctx, points, offset);
+          ctx.stroke();
+          ctx.globalCompositeOperation = "source-over";
+        }
       }
 
       ctx.restore();
@@ -248,9 +217,7 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       ctx.clearRect(0, 0, cache.width, cache.height);
       ctx.scale(dpr, dpr);
       for (const stroke of strokesRef.current) {
-        if (!dryingRef.current.includes(stroke)) {
-          drawFibers(ctx, stroke);
-        }
+        drawFibers(ctx, stroke);
       }
       ctx.setTransform(1, 0, 0, 1, 0, 0);
     }
@@ -264,19 +231,16 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       ctx.setTransform(1, 0, 0, 1, 0, 0);
     }
 
-    // ── Drying renderer ──
+    // ── Live stroke renderer ──
     //
-    // Two-pass approach:
-    //   1. Draw dry base (with fibers) — the settled marker look
-    //   2. Layer wet overlay bands on top (no fibers, wider, darker)
-    //
-    // Fresh ink covers the fiber streaks naturally.
-    // As wetness recedes, fibers are gradually revealed — the "drying" wave.
+    // The in-progress stroke redraws every frame in its final settled
+    // look — no trailing "wet" effects: anything that re-shapes already
+    // drawn ink reads as jitter under the pen. Drawn on a scratch canvas
+    // and blitted, so per-frame redraws never double-composite alpha.
 
-    function drawDryingStroke(
+    function drawLiveStroke(
       destCtx: CanvasRenderingContext2D,
       stroke: Stroke,
-      now: number,
       dpr: number
     ) {
       const pts = stroke.points;
@@ -296,8 +260,7 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
         if (p.x > maxX) maxX = p.x;
         if (p.y > maxY) maxY = p.y;
       }
-      const maxW = stroke.width * (1 + WET_WIDTH_BOOST);
-      const pad = maxW * 2;
+      const pad = stroke.width * 2;
       const bx = Math.max(0, Math.floor((minX - pad) * dpr));
       const by = Math.max(0, Math.floor((minY - pad) * dpr));
       const bx2 = Math.min(tmp.width, Math.ceil((maxX + pad) * dpr));
@@ -309,56 +272,16 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       tmpCtx.clearRect(bx, by, bw, bh);
       tmpCtx.save();
       tmpCtx.scale(dpr, dpr);
-
-      // Pass 1: dry base with fibers
       drawFibersCore(tmpCtx, pts, stroke.color, stroke.width);
-
-      // Pass 2: wet overlay bands — older to newer so the tip ends on top
-      for (let b = 0; b < WETNESS_BANDS.length - 1; b++) {
-        const uLo = WETNESS_BANDS[b];
-        const uHi = WETNESS_BANDS[b + 1];
-        const uMid = (uLo + uHi) / 2;
-        if (uMid < 0.01) continue;
-
-        // Convert wetness edges to time boundaries
-        // (linear approx for smoothstep — close enough for band splits)
-        const tLo = now - DRY_DURATION * (1 - uLo);
-        const tHi = now - DRY_DURATION * (1 - uHi);
-
-        // Find index range via binary search (timestamps are monotonic)
-        const idxLo = lowerBound(pts, tLo);
-        const idxHi = Math.min(pts.length - 1, lowerBound(pts, tHi));
-        if (idxHi <= idxLo) continue;
-
-        // Overlap by 1 sample on each side to hide seams
-        const bandFrom = Math.max(0, idxLo - 1);
-        const bandTo = Math.min(pts.length - 1, idxHi + 1);
-        if (bandTo - bandFrom < 1) continue;
-
-        const bandPoints = pts.slice(bandFrom, bandTo + 1);
-        if (bandPoints.length < 2) continue;
-
-        // Wet style: wider, darker, NO fibers — covers the dry streaks
-        tmpCtx.globalAlpha = WET_OVERLAY_ALPHA * uMid;
-        tmpCtx.globalCompositeOperation = "source-over";
-        tmpCtx.strokeStyle = darkenHex(stroke.color, uMid);
-        tmpCtx.lineCap = "round";
-        tmpCtx.lineJoin = "round";
-        tmpCtx.lineWidth = stroke.width * (1 + WET_WIDTH_BOOST * uMid);
-        tracePath(tmpCtx, bandPoints);
-        tmpCtx.stroke();
-      }
-
       tmpCtx.restore();
       tmpCtx.setTransform(1, 0, 0, 1, 0, 0);
 
-      // Blit scratch to destination
       destCtx.drawImage(tmp, bx, by, bw, bh, bx, by, bw, bh);
     }
 
     // ── Compositing ──
 
-    function compositeToScreen(now: number) {
+    function compositeToScreen() {
       const canvas = canvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext("2d")!;
@@ -367,48 +290,22 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(getCacheCanvas(), 0, 0);
 
-      for (const stroke of dryingRef.current) {
-        drawDryingStroke(ctx, stroke, now, dpr);
-      }
-
       const live = currentStrokeRef.current;
       if (live && live.points.length >= 2) {
-        drawDryingStroke(ctx, live, now, dpr);
+        drawLiveStroke(ctx, live, dpr);
       }
     }
 
-    // ── Animation loop ──
+    // ── Animation loop — runs only while the pointer is down ──
 
     function startAnimLoop() {
       if (animRafRef.current) return;
 
       function tick() {
-        const now = performance.now();
-
-        const stillDrying: Stroke[] = [];
-        const fullyDried: Stroke[] = [];
-
-        for (const stroke of dryingRef.current) {
-          const newestAge = now - stroke.points[stroke.points.length - 1].time;
-          if (newestAge >= DRY_DURATION) {
-            fullyDried.push(stroke);
-          } else {
-            stillDrying.push(stroke);
-          }
-        }
-
-        for (const stroke of fullyDried) {
-          appendToCache(stroke);
-        }
-        dryingRef.current = stillDrying;
-
-        compositeToScreen(now);
-
-        if (stillDrying.length > 0 || isDrawingRef.current) {
-          animRafRef.current = requestAnimationFrame(tick);
-        } else {
-          animRafRef.current = 0;
-        }
+        compositeToScreen();
+        animRafRef.current = isDrawingRef.current
+          ? requestAnimationFrame(tick)
+          : 0;
       }
 
       animRafRef.current = requestAnimationFrame(tick);
@@ -449,11 +346,8 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
         return true;
       });
       if (strokesRef.current.length < before) {
-        dryingRef.current = dryingRef.current.filter((s) =>
-          strokesRef.current.includes(s)
-        );
         rebuildCache();
-        compositeToScreen(performance.now());
+        compositeToScreen();
       }
     }
 
@@ -510,10 +404,10 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
         currentStrokeRef.current.points.length >= 2
       ) {
         strokesRef.current = [...strokesRef.current, currentStrokeRef.current];
-        dryingRef.current = [...dryingRef.current, currentStrokeRef.current];
-        startAnimLoop();
+        appendToCache(currentStrokeRef.current);
       }
       currentStrokeRef.current = null;
+      compositeToScreen();
     }, []);
 
     const handlePointerLeave = useCallback(() => {
@@ -575,18 +469,15 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
 
     useImperativeHandle(ref, () => ({
       undo() {
-        const removed = strokesRef.current[strokesRef.current.length - 1];
         strokesRef.current = strokesRef.current.slice(0, -1);
-        dryingRef.current = dryingRef.current.filter((s) => s !== removed);
         rebuildCache();
-        compositeToScreen(performance.now());
+        compositeToScreen();
       },
       clear() {
         strokesRef.current = [];
-        dryingRef.current = [];
         cacheCanvasRef.current = null;
         getCacheCanvas();
-        compositeToScreen(performance.now());
+        compositeToScreen();
       },
       getCanvas() {
         return canvasRef.current;
@@ -601,9 +492,11 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
         <canvas
           ref={canvasRef}
           data-penseat="canvas"
-          className="absolute top-0 left-0"
           style={{
-            pointerEvents: active ? "auto" : "none",
+            position: "absolute",
+            top: 0,
+            left: 0,
+            pointerEvents: active && !penDisabled ? "auto" : "none",
             cursor: active
               ? color === ERASER_COLOR
                 ? "none"
@@ -613,11 +506,16 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
             touchAction: "none",
           }}
         />
-        {active && isEraser && (
+        {active && isEraser && !penDisabled && (
           <div
             ref={eraserCursorRef}
-            className="fixed z-[99999] pointer-events-none -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white"
             style={{
+              position: "fixed",
+              zIndex: 99999,
+              pointerEvents: "none",
+              transform: "translate(-50%, -50%)",
+              borderRadius: "9999px",
+              border: "2px solid #ffffff",
               width: ERASER_RADIUS * 2,
               height: ERASER_RADIUS * 2,
               mixBlendMode: "difference",
