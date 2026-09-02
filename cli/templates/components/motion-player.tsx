@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { type GrabbedElement, labelFor, midTruncate, componentNameFor, describeMotionIntent } from "./element-inspector";
 
-const GHOST_FRAMES = 5;
+// Onion skin shows this many steps before and after the paused instant
+const ONION_STEPS = 3;
 const MAX_GHOST_LAYERS = 6;
 const PANEL_BG = "#18181b";
 const LANE_GAP = 14; // space between the label column and the timelines
@@ -49,6 +50,8 @@ const RestartIcon = <svg {...iconProps}><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0
 // Onion skin — two overlapping frames, the older one fainter
 const OnionIcon = <svg width={16} height={16} viewBox="0 0 24 24" fill="none"><circle cx="9" cy="12" r="5.5" fill="currentColor" opacity="0.4"/><circle cx="15" cy="12" r="5.5" fill="currentColor" opacity="0.85"/></svg>;
 const CloseIcon = <svg {...iconProps}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>;
+const MinimizeIcon = <svg {...iconProps}><path d="M5 12h14"/></svg>;
+const RestoreIcon = <svg {...iconProps}><rect x="5" y="5" width="14" height="14" rx="2"/></svg>;
 const CheckIcon = <svg {...iconProps} strokeWidth={3}><path d="M20 6 9 17l-5-5"/></svg>;
 
 // ── Timing edits ──
@@ -350,6 +353,33 @@ const TRANSFORM_IDENTITY: Record<string, string> = {
   skewX: "0deg", skewY: "0deg",
 };
 
+// Amplitude: scale a keyframe value about its neutral point — 0 for
+// translate/rotate/skew, 1 for scale and opacity — so 150% on a
+// translateY(-130px) is -195px and 150% on scale(1.32, 0.64) is
+// scale(1.48, 0.46). Comma lists are scaled per component; anything
+// non-numeric passes through untouched.
+function scaleAbout(raw: string, neutral: number, k: number): string {
+  return raw
+    .split(",")
+    .map((part) => {
+      const m = /^\s*(-?\d*\.?\d+)([a-z%]*)\s*$/i.exec(part);
+      if (!m) return part.trim();
+      const n = neutral + (parseFloat(m[1]) - neutral) * k;
+      const rounded = Math.round(n * 1000) / 1000;
+      return `${rounded}${m[2]}`;
+    })
+    .join(", ");
+}
+
+// Which tracks an amplitude dial makes sense for, and their neutral value
+function amplitudeNeutral(track: PropTrack): number | null {
+  if (track.key === "opacity") return 1;
+  if (track.slot == null || !track.sig) return null;
+  const fn = track.sig[track.slot];
+  if (!(fn in TRANSFORM_IDENTITY)) return null;
+  return fn.startsWith("scale") ? 1 : 0;
+}
+
 // "rotate(14deg) translateX(26px)" → [{fn, arg}, …]; "none" → []; junk → null
 function parseTransformList(value: string): { fn: string; arg: string }[] | null {
   const t = value.trim();
@@ -368,12 +398,12 @@ function decomposeTransformTrack(
   keyframes: ComputedKeyframe[],
   target: Element | null
 ): PropTrack[] {
-  // Leaf = no element children, or an SVG (its children are drawing
-  // internals, not layout) — the smallest meaningful selection
-  const isLeaf =
-    target instanceof Element &&
-    (target.children.length === 0 || target instanceof SVGElement);
-  if (!isLeaf) return tracks;
+  // Any element qualifies — a wrapper that only exists to carry one
+  // transform (a mover, a hopper, a squasher stacked around a ball) is
+  // exactly the kind of layer whose transform should read as "x position"
+  // rather than a matrix. The signature check below is the real guard:
+  // only a consistently-shaped transform list gets split.
+  if (!(target instanceof Element)) return tracks;
   const ti = tracks.findIndex((t) => t.key === "transform");
   if (ti === -1) return tracks;
   const raws = keyframes.filter((kf) => kf.transform != null).map((kf) => String(kf.transform));
@@ -524,6 +554,11 @@ function inspectLayers(root: Element): LayerInfo[] {
 
 interface GhostFrame {
   styles: Record<string, string>;
+  // Animated descendants, frozen at the same instant. A ghost is a deep
+  // clone, and a cloned child keeps its animation classes — without this
+  // the children of a paused scene keep moving inside their ghosts.
+  // Indexed into the layer element's descendant list (document order).
+  inner: { i: number; styles: Record<string, string> }[];
   alpha: number;
   // Scene time the frame was sampled at (ms) — rendered as a label so
   // the copied screenshot carries real timing numbers
@@ -561,6 +596,67 @@ function layoutRect(el: HTMLElement | SVGElement) {
   };
 }
 
+// The route of every outermost animated object across its whole window, in
+// document coordinates. Seeks the scene like the ghost sampler does and puts
+// it back exactly as found — playing or paused, at the same time.
+type RoutePoint = { x: number; y: number; t: number };
+function sampleRoutes(
+  layers: LayerInfo[],
+  allAnims: Animation[],
+  span: number
+): RoutePoint[][] {
+  const prev = allAnims.map((a) => ({
+    time: Number(a.currentTime ?? 0),
+    running: a.playState === "running",
+  }));
+  const drawable = layers.filter(
+    (l) => l.el instanceof HTMLElement || l.el instanceof SVGElement
+  );
+  const roots = drawable.filter(
+    (l) => !drawable.some((o) => o !== l && o.el.contains(l.el))
+  );
+  const routes: RoutePoint[][] = [];
+  for (const layer of roots) {
+    let start = Infinity;
+    let end = 0;
+    for (const info of layer.infos) {
+      const timing =
+        info.anim.effect instanceof KeyframeEffect ? info.anim.effect.getTiming() : null;
+      const delay = typeof timing?.delay === "number" ? timing.delay : info.delay;
+      const dur = typeof timing?.duration === "number" ? timing.duration : info.duration;
+      start = Math.min(start, delay);
+      end = Math.max(end, delay + dur);
+    }
+    start = Math.max(0, Math.min(start, span));
+    end = Math.max(start, Math.min(end, span));
+    if (end <= start) continue;
+    const leaf = paintedLeaf(layer.el);
+    const pts: RoutePoint[] = [];
+    for (let i = 0; i < PATH_SAMPLES; i++) {
+      const t = Math.min(end - 1e-3, start + ((end - start) * i) / (PATH_SAMPLES - 1));
+      for (const a of allAnims) {
+        a.pause();
+        a.currentTime = t;
+      }
+      const r = leaf.getBoundingClientRect();
+      pts.push({
+        x: r.left + r.width / 2 + window.scrollX,
+        y: r.top + r.height / 2 + window.scrollY,
+        t,
+      });
+    }
+    // An object that never leaves its spot (opacity pulses, colour cycles)
+    // has no route worth drawing
+    const moves = pts.some((q) => Math.hypot(q.x - pts[0].x, q.y - pts[0].y) > 1);
+    if (moves) routes.push(pts);
+  }
+  for (let i = 0; i < allAnims.length; i++) {
+    allAnims[i].currentTime = prev[i].time;
+    if (prev[i].running) allAnims[i].play();
+  }
+  return routes;
+}
+
 // Ghosts for one layer: trail frames sampled across the layer's own
 // active window, or — when the frames never move — a filmstrip resampled
 // at shared scene times so staggered siblings show their real phase shift
@@ -569,18 +665,79 @@ interface LayerGhosts {
   strip: boolean;
 }
 
+// Samples per layer for the motion path — fine enough that a 600ms hop
+// inside a 4s loop still reads as a curve, not a polygon
+const PATH_SAMPLES = 96;
+
+// The element whose pixels actually move: the innermost animated leaf if the
+// layer wraps one (a mover around a hopper around a ball), else the layer
+// itself. Its client rect composes every ancestor transform.
+function paintedLeaf(el: Element): Element {
+  let leaf: Element | null = null;
+  el.querySelectorAll("*").forEach((kid) => {
+    if (leaf || kid.children.length) return;
+    try {
+      if (kid.getAnimations().length) leaf = kid;
+    } catch {}
+  });
+  return leaf ?? el;
+}
+
+// The route as an SVG polyline, faint at the start of the window and solid
+// by its end — the same time-order gradient the ghosts use, so direction
+// reads without arrows. Sized to the path's bounding box, not the page.
+function buildPathSvg(points: { x: number; y: number }[]): SVGSVGElement {
+  const PAD = 4;
+  const minX = Math.min(...points.map((p) => p.x)) - PAD;
+  const minY = Math.min(...points.map((p) => p.y)) - PAD;
+  const maxX = Math.max(...points.map((p) => p.x)) + PAD;
+  const maxY = Math.max(...points.map((p) => p.y)) + PAD;
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("width", String(maxX - minX));
+  svg.setAttribute("height", String(maxY - minY));
+  svg.style.cssText = `position:absolute;left:${minX}px;top:${minY}px;overflow:visible;pointer-events:none;`;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    // A seam (a loop jumping from its exit back to its entry) is not travel
+    if (Math.hypot(b.x - a.x, b.y - a.y) > 400) continue;
+    const line = document.createElementNS(NS, "line");
+    line.setAttribute("x1", String(a.x - minX));
+    line.setAttribute("y1", String(a.y - minY));
+    line.setAttribute("x2", String(b.x - minX));
+    line.setAttribute("y2", String(b.y - minY));
+    line.setAttribute("stroke", "#52525b");
+    line.setAttribute("stroke-width", "2");
+    line.setAttribute("stroke-linecap", "round");
+    line.setAttribute("opacity", String(0.22 + 0.63 * (i / (points.length - 1))));
+    svg.appendChild(line);
+  }
+  return svg;
+}
+
 function sampleScene(
   layers: LayerInfo[],
   allAnims: Animation[],
-  span: number
+  span: number,
+  // Scene time the onion skin was switched on at — ghosts sit around it
+  now: number
 ): Map<LayerInfo, LayerGhosts> {
   const prev = allAnims.map((a) => ({
     time: a.currentTime,
     running: a.playState === "running",
   }));
   const result = new Map<LayerInfo, LayerGhosts>();
-  const targets = layers
-    .filter((l) => l.el instanceof HTMLElement || l.el instanceof SVGElement)
+  const drawable = layers.filter(
+    (l) => l.el instanceof HTMLElement || l.el instanceof SVGElement
+  );
+  // A ghost is a deep clone frozen at the sampled instant, so a wrapper's
+  // ghost already carries the pose of every animated layer inside it.
+  // Ghosting those inner layers as well paints the same object again for
+  // each nesting level — a stack of wrappers around one ball drew it four
+  // times per step. Keep the outermost layer of each chain only.
+  const targets = drawable
+    .filter((l) => !drawable.some((o) => o !== l && o.el.contains(l.el)))
     .slice(0, MAX_GHOST_LAYERS);
 
   const sampleAt = (layer: LayerInfo, t: number, alpha: number): GhostFrame => {
@@ -597,7 +754,30 @@ function sampleScene(
         const cssProp = kebab(track.key);
         styles[cssProp] = cs.getPropertyValue(cssProp);
       }
-    return { styles, alpha, t };
+    // Descendants with animations of their own: read whichever properties
+    // their keyframes touch, as computed right now (the scene is seeked to t)
+    const inner: GhostFrame["inner"] = [];
+    const kids = layer.el.querySelectorAll("*");
+    kids.forEach((kid, i) => {
+      let anims: Animation[] = [];
+      try {
+        anims = kid.getAnimations();
+      } catch {}
+      if (!anims.length) return;
+      const props = new Set<string>();
+      for (const a of anims) {
+        if (!(a.effect instanceof KeyframeEffect)) continue;
+        for (const kf of a.effect.getKeyframes())
+          for (const key of Object.keys(kf))
+            if (!KEYFRAME_META.has(key) && kf[key] != null) props.add(kebab(key));
+      }
+      if (!props.size) return;
+      const kcs = getComputedStyle(kid);
+      const snap: Record<string, string> = {};
+      for (const prop of props) snap[prop] = kcs.getPropertyValue(prop);
+      inner.push({ i, styles: snap });
+    });
+    return { styles, inner, alpha, t };
   };
 
   for (const layer of targets) {
@@ -622,38 +802,39 @@ function sampleScene(
       end = span;
     }
 
-    // Sample the layer's own delay → end window — a short or staggered
-    // layer gets its ghosts spread over its actual motion instead of
-    // clumped at its fill state. The endpoint sits a hair shy of end:
-    // at exactly endTime a fill:none animation is past its active phase
-    // and snaps to base styles.
-    // Opacity encodes time order: faintest = start, strongest = latest.
-    let frames: GhostFrame[] = [];
-    for (let i = 0; i < GHOST_FRAMES; i++) {
-      const t = Math.min(
-        start + ((end - start) * i) / (GHOST_FRAMES - 1),
-        end - 1e-3
-      );
-      frames.push(sampleAt(layer, t, 0.18 + 0.67 * (i / (GHOST_FRAMES - 1))));
-    }
-
-    // Frames that never move render as a filmstrip; those resample at
-    // shared scene times so staggered siblings (blink dots) show their
-    // phase shift instead of five identical cycles
-    const strip = frames.every(
-      (f) =>
-        (f.styles.transform ?? "none") ===
-        (frames[0].styles.transform ?? "none")
+    // Ghosts sit around the instant the onion skin came on: ONION_STEPS
+    // before it and ONION_STEPS after, at a fixed step — a slice of the
+    // motion either side of *now*, not a summary of the whole cycle. The
+    // step scales with the layer's own window so a short hop and a long
+    // drift both get a readable slice; the instant itself is not ghosted,
+    // the live element already stands there.
+    const win = end - start;
+    const step = Math.min(250, Math.max(30, win / 24));
+    // Looping layers wrap around their window; a one-shot clamps to it
+    const loops = layer.infos.some((i) => i.iterations > 1);
+    const timeAt = (k: number) => {
+      const t = now + k * step;
+      if (loops && win > 0) return start + (((t - start) % win) + win) % win;
+      return Math.min(end - 1e-3, Math.max(start, t));
+    };
+    const offsets = [];
+    for (let k = -ONION_STEPS; k <= ONION_STEPS; k++) if (k !== 0) offsets.push(k);
+    // Opacity encodes time order: faintest = earliest, strongest = latest
+    const frames = offsets.map((k, i) =>
+      sampleAt(layer, timeAt(k), 0.18 + 0.67 * (i / (offsets.length - 1)))
     );
-    if (strip) {
-      frames = Array.from({ length: GHOST_FRAMES }, (_, i) =>
-        sampleAt(
-          layer,
-          Math.min((span * i) / (GHOST_FRAMES - 1), span - 1e-3),
-          0.18 + 0.67 * (i / (GHOST_FRAMES - 1))
-        )
-      );
-    }
+
+    // A layer whose frames all share one pose (opacity pulses, colour
+    // cycles) would stack its ghosts into one pile — those render as a
+    // filmstrip below the element instead. The pose is the layer's own
+    // transform AND its animated descendants': a wrapper that only moves
+    // in x is standing still while the ball inside it bounces, and those
+    // ghosts belong at the bounce, not in a strip.
+    const pose = (f: GhostFrame) =>
+      (f.styles.transform ?? "none") +
+      "|" +
+      f.inner.map((k) => `${k.i}:${k.styles.transform ?? ""}`).join(";");
+    const strip = frames.every((f) => pose(f) === pose(frames[0]));
     result.set(layer, { frames, strip });
   }
 
@@ -713,7 +894,10 @@ const chipStyle = (edited: boolean): React.CSSProperties => ({
   fontFamily: "monospace",
   fontSize: 10,
   lineHeight: 1,
-  padding: "3px 0",
+  // Top-biased padding: ease labels are all-lowercase ("bezier", "in-out"),
+  // whose ink mass sits at x-height — a line-box-centered label reads ~1px
+  // low next to the digit-filled duration chip. Lift it one optical pixel.
+  padding: "2px 0 4px",
   borderRadius: 4,
   border: "1px solid rgba(255,255,255,0.14)",
   backgroundColor: "#27272a",
@@ -744,6 +928,127 @@ const durBoxStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
   outline: "none",
 };
+
+// ── Dial view building blocks ──
+//
+// A single tuned object treats its motion as the thing being adjusted, not a
+// timeline being edited: each parameter is a dial. The dial is a Figma-style
+// scrub field — drag to sweep the value while the animation runs, click to
+// type it exactly.
+
+const dialBoxStyle: React.CSSProperties = {
+  minWidth: 76,
+  height: 26,
+  boxSizing: "border-box",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontFamily: "monospace",
+  fontSize: 12,
+  padding: "0 10px",
+  borderRadius: 6,
+  borderWidth: 1,
+  borderStyle: "solid",
+  borderColor: "rgba(255,255,255,0.14)",
+  backgroundColor: "#27272a",
+  color: "#e4e4e7",
+  whiteSpace: "nowrap",
+  outline: "none",
+  userSelect: "none",
+  textAlign: "center",
+};
+
+function DialField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ fontSize: 9, color: "#71717a" }}>{label}</span>
+      {children}
+    </span>
+  );
+}
+
+function ScrubDial({ value, active, format, parse, onApply, min, max, perPx }: {
+  value: number;
+  // Edited away from the original — brightens like the timeline chips
+  active: boolean;
+  format: (v: number) => string;
+  parse: (s: string) => number | null;
+  onApply: (v: number) => void;
+  min: number;
+  max: number;
+  // Value change per horizontal pixel of drag
+  perPx: number;
+}) {
+  const [editing, setEditing] = useState(false);
+  const drag = useRef<{ startX: number; base: number; moved: boolean } | null>(null);
+  const clamp = (v: number) => Math.min(max, Math.max(min, Math.round(v)));
+  if (editing)
+    return (
+      <input
+        autoFocus
+        defaultValue={format(value)}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            const v = parse(e.currentTarget.value.trim());
+            if (v != null) onApply(clamp(v));
+            setEditing(false);
+          }
+          if (e.key === "Escape") setEditing(false);
+        }}
+        onBlur={(e) => {
+          const v = parse(e.currentTarget.value.trim());
+          if (v != null) onApply(clamp(v));
+          setEditing(false);
+        }}
+        style={{
+          ...dialBoxStyle,
+          width: 90,
+          borderColor: "rgba(255,255,255,0.35)",
+          color: "#f4f4f5",
+          userSelect: "text",
+        }}
+      />
+    );
+  return (
+    <span
+      title="Drag to adjust · click to type"
+      onPointerDown={(e) => {
+        e.preventDefault();
+        drag.current = { startX: e.clientX, base: value, moved: false };
+        // Throws when the pointer is already gone (lifted pen, synthetic
+        // events); the drag still works, just without capture
+        try {
+          (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+        } catch {}
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current;
+        if (!d) return;
+        const dx = e.clientX - d.startX;
+        if (!d.moved && Math.abs(dx) < 3) return;
+        d.moved = true;
+        onApply(clamp(d.base + dx * perPx));
+      }}
+      onPointerUp={() => {
+        const d = drag.current;
+        drag.current = null;
+        // A clean click (no sweep) opens exact entry
+        if (d && !d.moved) setEditing(true);
+      }}
+      style={{
+        ...dialBoxStyle,
+        cursor: "ew-resize",
+        touchAction: "none",
+        color: active ? "#f4f4f5" : "#a1a1aa",
+        ...(active ? { borderColor: "rgba(255,255,255,0.3)" } : {}),
+      }}
+    >
+      {format(value)}
+    </span>
+  );
+}
 
 interface KeyframeValueEdit {
   prop: string;
@@ -868,6 +1173,12 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
   const layers = useMemo(() => inspectLayers(grab.el), [grab.el]);
   const allInfos = useMemo(() => layers.flatMap((l) => l.infos), [layers]);
   const allAnims = useMemo(() => allInfos.map((i) => i.anim), [allInfos]);
+  // One animated object → dial view; a scene of several → timeline view.
+  // "One object" means one nesting chain: a ball built from a mover, a
+  // hopper, a squasher and a spinner stacked inside each other is still one
+  // thing to tune, so it counts by outermost layers, not by layers.
+  const solo =
+    layers.filter((l) => !layers.some((o) => o !== l && o.el.contains(l.el))).length === 1;
 
   // Live timing edits, keyed by animation index — originals stay on allInfos
   const [edits, setEdits] = useState<Map<number, TimingEdit>>(new Map());
@@ -885,6 +1196,10 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
     foldTime(span, Number(allAnims[0]?.currentTime ?? 0))
   );
   const [onion, setOnion] = useState(false);
+  // Folded down to header + transport: the scrubber and its ruler stay, the
+  // layer tracks go. The scene stays exactly as it is — paused, onion ghosts
+  // and all — the panel just takes less of the page.
+  const [minimized, setMinimized] = useState(false);
   // Layer row being hovered — highlights the element on the page
   const [layerRect, setLayerRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   // Section header under the pointer — headers select their layer too
@@ -900,7 +1215,7 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
   const speedBase = useRef<Map<number, number> | null>(null);
 
   // Keyframe value editing
-  const [, setKfBump] = useState(0); // re-render after keyframe writes
+  const [kfBump, setKfBump] = useState(0); // re-render after keyframe writes
   const [kfEdit, setKfEdit] = useState<{ infoIdx: number; key: string; occ: number } | null>(null);
   const colorInputRef = useRef<HTMLInputElement>(null);
   const dragKf = useRef<{ infoIdx: number; key: string; prop: string; occ: number; lane: HTMLElement; from: number; moved: boolean; startX: number } | null>(null);
@@ -909,11 +1224,15 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
 
   // Timing editor UI state
   const [durEditIdx, setDurEditIdx] = useState<number | null>(null);
+  // Solo objects open on dials; the timeline stays reachable for
+  // keyframe-level work (values, colors, per-keyframe retiming)
+  const [showTimeline, setShowTimeline] = useState(false);
   const [easeMenu, setEaseMenu] = useState<{ idx: number; x: number; y: number; custom: boolean; spring: SpringParams | null; bezier: Bezier | null } | null>(null);
   const bzDrag = useRef<1 | 2 | null>(null);
   const scrubbing = useRef(false);
   const barRef = useRef<HTMLDivElement>(null);
   const ghostRef = useRef<HTMLDivElement>(null);
+  const routeRef = useRef<HTMLDivElement>(null);
   const tracksRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -940,18 +1259,27 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
     if (el) setGutter(el.offsetWidth - el.clientWidth);
   });
 
-  // Playhead follows the real animation clock
+  // Playhead follows the real animation clock. The tick reads the scene
+  // through a ref rather than depending on allAnims/span: those are memo-
+  // stable in healthy renders, but if their identity ever churns per render
+  // (an HMR remount, a broken memo upstream) an effect keyed on them
+  // re-subscribes on every setTime and React trips "maximum update depth".
+  // Keyed on `playing` alone, the loop stays subscribed once and always
+  // reads current values.
+  const clockRef = useRef({ allAnims, span });
+  clockRef.current = { allAnims, span };
   useEffect(() => {
     if (!playing) return;
     let raf = 0;
     const tick = () => {
-      const a = allAnims[0];
-      if (a) setTime(foldTime(span, Number(a.currentTime ?? 0)));
+      const { allAnims: anims, span: sp } = clockRef.current;
+      const a = anims[0];
+      if (a) setTime(foldTime(sp, Number(a.currentTime ?? 0)));
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [playing, allAnims, span]);
+  }, [playing]);
 
   function playPause() {
     if (playing) {
@@ -1040,6 +1368,34 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
     setEdits((prev) => {
       const next = new Map(prev);
       next.set(idx, { ...next.get(idx), ...patch });
+      return next;
+    });
+  }
+
+  // Amplitude dials — per property track, as a factor of the baseline
+  // (what the animation looked like when first seen, or last committed)
+  const [amps, setAmps] = useState<Map<string, number>>(new Map());
+  const ampKey = (idx: number, track: PropTrack) => `${idx}:${track.prop}`;
+  function baselineTrackValues(idx: number, track: PropTrack): string[] {
+    const anim = allInfos[idx].anim;
+    const snap = COMMITTED.get(anim) ?? FIRST_SEEN.get(anim);
+    if (!snap) return [];
+    const raws = snap.keyframes
+      .filter((kf) => kf[track.key] != null)
+      .map((kf) => String(kf[track.key]));
+    // Sub-tracks read their own slot out of the full transform
+    return raws.map((raw) => (track.slot == null ? raw : displayValue(raw, track)));
+  }
+  function applyAmplitude(idx: number, track: PropTrack, k: number) {
+    const neutral = amplitudeNeutral(track);
+    if (neutral == null) return;
+    const base = baselineTrackValues(idx, track);
+    base.forEach((raw, occ) => {
+      commitTrackValue(idx, track, occ, scaleAbout(raw, neutral, k));
+    });
+    setAmps((prev) => {
+      const next = new Map(prev);
+      next.set(ampKey(idx, track), k);
       return next;
     });
   }
@@ -1424,6 +1780,26 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
     onCommit();
   }
 
+  // Route: the object's path across its whole cycle, drawn whenever the
+  // player is open — onion or not. It is what makes a pen stroke over the
+  // screenshot read as a delta ("this is where it goes, this is where I
+  // want it to go") instead of a sketch of the current motion. Redrawn
+  // after edits settle, since a dial changes the route; debounced so a
+  // drag doesn't seek the scene 96 times per pointer move.
+  useEffect(() => {
+    const container = routeRef.current;
+    if (!container) return;
+    const id = window.setTimeout(() => {
+      container.innerHTML = "";
+      for (const route of sampleRoutes(layers, allAnims, span))
+        container.appendChild(buildPathSvg(route));
+    }, 120);
+    return () => {
+      window.clearTimeout(id);
+      container.innerHTML = "";
+    };
+  }, [layers, allAnims, span, edits, kfBump]);
+
   // Onion skin: pause the scene, sample every layer, render ghost clones.
   // Ghosts are NOT marked data-penseat — they are part of the screenshot.
   useEffect(() => {
@@ -1446,7 +1822,11 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
       return s;
     };
 
-    const sampled = sampleScene(layers, allAnims, span);
+    // Anchor on the scene clock as it stands right now (the effect just
+    // paused it), read straight from the animation rather than React state
+    // so toggling doesn't have to wait a render
+    const now = foldTime(span, Number(allAnims[0]?.currentTime ?? 0));
+    const sampled = sampleScene(layers, allAnims, span, now);
     const entries = [...sampled].flatMap(([layer, ghosts]) => {
       const el = layer.el as HTMLElement | SVGElement;
       // Inner SVG nodes can't render outside an <svg> root — those ghosts
@@ -1490,10 +1870,17 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
         wrap.style.cssText = `position:absolute;left:${base.x}px;top:${top}px;width:${base.w}px;height:${base.h}px;pointer-events:none;transform:${wrapTransform};opacity:${alpha};`;
         // Dashed ring marks every sampled frame — the live element is the
         // only unringed object, so a ghost sitting on top of it (a cycle's
-        // first/last frame) can never pass for the element itself
-        wrap.style.outline = "1px dashed rgba(113,113,122,0.6)";
-        wrap.style.outlineOffset = "1.5px";
-        if (ringRadius) wrap.style.borderRadius = ringRadius;
+        // first/last frame) can never pass for the element itself.
+        // When the pose lives in animated descendants (a wrapper that only
+        // moves in x around a ball that hops and squashes), the wrapper's
+        // box says nothing about where the object is — ring the painted
+        // leaves inside instead, further down once the clone exists.
+        const ringLeaves = frame.inner.length > 0;
+        if (!ringLeaves) {
+          wrap.style.outline = "1px dashed rgba(113,113,122,0.6)";
+          wrap.style.outlineOffset = "1.5px";
+          if (ringRadius) wrap.style.borderRadius = ringRadius;
+        }
         if (strip) {
           if (ghosts === axis?.ghosts) {
             const lbl = makeLabel(fmtMs(frame.t));
@@ -1536,11 +1923,55 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
         clone.style.setProperty("animation", "none", "important");
         clone.style.setProperty("transition", "none", "important");
         clone.style.setProperty("margin", "0", "important");
+        // Freeze the whole subtree at the sampled instant. cloneNode copies
+        // the children's animation classes along with them, so left alone
+        // they would animate inside the ghost — a paused scene with ghosts
+        // that still bounce.
+        const kids = clone.querySelectorAll("*");
+        kids.forEach((kid) => {
+          const ks = (kid as HTMLElement | SVGElement).style;
+          ks.setProperty("animation", "none", "important");
+          ks.setProperty("transition", "none", "important");
+        });
+        const srcKids = el.querySelectorAll("*");
+        let ringed = false;
+        for (const { i, styles } of frame.inner) {
+          const kid = kids[i] as HTMLElement | SVGElement | undefined;
+          const ks = kid?.style;
+          if (!kid || !ks) continue;
+          for (const [prop, value] of Object.entries(styles))
+            if (value) ks.setProperty(prop, value, "important");
+          // Animated leaf = what actually gets painted; that's what the
+          // dashed ring should hug
+          if (ringLeaves && kid.children.length === 0) {
+            ks.setProperty("outline", "1px dashed rgba(113,113,122,0.6)", "important");
+            ks.setProperty("outline-offset", "1.5px", "important");
+            const r = srcKids[i] ? getComputedStyle(srcKids[i]).borderRadius : "";
+            if (r) ks.setProperty("border-radius", r, "important");
+            ringed = true;
+          }
+        }
+        if (ringLeaves && !ringed) {
+          // Nothing paintable to ring inside — fall back to the box
+          wrap.style.outline = "1px dashed rgba(113,113,122,0.6)";
+          wrap.style.outlineOffset = "1.5px";
+          if (ringRadius) wrap.style.borderRadius = ringRadius;
+        }
         if (!svgRoot) {
           // Cloned spans revert to display:inline, which ignores width/height
           clone.style.setProperty("display", "block", "important");
           clone.style.setProperty("width", `${base.w}px`, "important");
           clone.style.setProperty("height", `${base.h}px`, "important");
+          // The wrapper already sits at the element's laid-out position, so
+          // the clone must fill it from its top-left. Its own classes still
+          // say things like `left-1/2 -ml-7` — inside the wrapper that reads
+          // as "half of 56px" with the margin already zeroed above, and the
+          // ghost lands 28px to the right of where the element is.
+          clone.style.setProperty("position", "absolute", "important");
+          clone.style.setProperty("inset", "auto", "important");
+          clone.style.setProperty("left", "0", "important");
+          clone.style.setProperty("top", "0", "important");
+          clone.style.setProperty("transform", "none", "important");
         }
         for (const [prop, value] of Object.entries(frame.styles)) {
           if (prop === "transform") continue; // wrapper (or inner clone below)
@@ -1744,6 +2175,12 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
 
   return (
     <>
+      {/* Route layer — captured in the screenshot (no data-penseat), under
+          the ghosts */}
+      <div
+        ref={routeRef}
+        style={{ position: "absolute", top: 0, left: 0, zIndex: 9994 }}
+      />
       {/* Ghost layer — captured in the screenshot (no data-penseat) */}
       <div
         ref={ghostRef}
@@ -1779,7 +2216,8 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
           bottom: 16,
           transform: "translateX(-50%)",
           zIndex: 9999,
-          width: 568,
+          // Room for the lanes to breathe; capped so small windows keep a margin
+          width: "min(720px, calc(100vw - 32px))",
           backgroundColor: PANEL_BG,
           border: "1.5px solid rgba(255,255,255,0.25)",
           boxShadow: "0 0 0 0.5px rgba(255,255,255,0.06), 0 4px 16px rgba(0,0,0,0.3)",
@@ -1792,7 +2230,7 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
           userSelect: "none",
         }}
       >
-        {/* Header: title · onion skin ····· check (when edited) · close */}
+        {/* Header: title · onion skin ····· check (when edited) · minimize · close */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
           <span style={{ color: "#71717a", overflow: "hidden", whiteSpace: "nowrap" }}>
             {midTruncate(grab.label, 28)}
@@ -1823,6 +2261,15 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
               {CheckIcon}
             </button>
           )}
+          <button
+            aria-label={minimized ? "Restore player" : "Minimize player"}
+            title={minimized ? "Show the layer tracks" : "Minimize — keeps the timeline, hides the layer tracks"}
+            data-penseat-btn=""
+            onClick={() => setMinimized((m) => !m)}
+            style={btnStyle}
+          >
+            {minimized ? RestoreIcon : MinimizeIcon}
+          </button>
           <button aria-label="Close player" data-penseat-btn="" onClick={onClose} style={btnStyle}>
             {CloseIcon}
           </button>
@@ -1841,7 +2288,8 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
             height: 16,
             width: 1,
             backgroundColor: "#f4f4f5",
-            opacity: 0.5,
+            opacity: minimized ? 0 : 0.5,
+            transition: "opacity 200ms ease-out",
             pointerEvents: "none",
           }}
         />
@@ -1855,7 +2303,7 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
               flexShrink: 0,
               display: "flex",
               alignItems: "center",
-              gap: 2,
+              gap: 8,
             }}
           >
             <button
@@ -1924,11 +2372,12 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                   style={{
                     position: "absolute",
                     left: `${(t / span) * 100}%`,
-                    // pulled into the lane and down through the track line —
                     // at 100% an unshifted tick floats one pixel past the
                     // line's end and reads as disconnected
                     marginLeft: edge === "start" ? 0 : -1,
-                    top: 18,
+                    // Centered on the track line: a faint stroke crossing it,
+                    // not a lug sitting on top of it
+                    top: 21,
                     width: 1,
                     height: 7,
                     backgroundColor: "#3f3f46",
@@ -1968,19 +2417,16 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
               <button
                 key={v}
                 title={v === 1 ? "Normal speed" : `Slow motion — ${v}x speed`}
+                // Same quiet icon-button frame as play/restart; the active
+                // speed holds its fill, so it skips the shared hover rule
+                {...(speed === v ? {} : { "data-penseat-btn": "" })}
                 onClick={() => applySpeed(v)}
                 style={{
-                  ...durBoxStyle,
-                  width: 32,
-                  height: 32,
-                  padding: 0,
-                  borderRadius: 999,
+                  ...btnStyle,
                   fontSize: 9,
-                  lineHeight: "30px",
-                  cursor: "pointer",
-                  color: speed === v ? "#f4f4f5" : "#a1a1aa",
-                  backgroundColor: speed === v ? "#3f3f46" : "#27272a",
-                  borderColor: speed === v ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.14)",
+                  ...(speed === v
+                    ? { color: "#f4f4f5", backgroundColor: "#3f3f46" }
+                    : {}),
                 }}
               >
                 {String(v).replace("0.", ".")}x
@@ -1988,6 +2434,42 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
             ))}
           </span>
         </div>
+
+        {/* Collapsible lower half. grid-template-rows 1fr → 0fr animates the
+            height without measuring it; the inner wrapper clips. Its margins
+            mirror the tracks' bleed so the scrollbar still meets the panel
+            edge and header hover pills still reach into the padding. */}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateRows: minimized ? "0fr" : "1fr",
+            transition: "grid-template-rows 200ms ease-out",
+          }}
+        >
+        <div
+          style={{
+            overflow: "hidden",
+            minHeight: 0,
+            margin: "0 -18px",
+            padding: "0 18px",
+            // Clipped content is still focusable — take it out of the tab
+            // order once the fold has finished, put it back the instant it
+            // starts to open
+            visibility: minimized ? "hidden" : "visible",
+            transition: minimized ? "visibility 0s 200ms" : "visibility 0s",
+          }}
+        >
+        {solo && (
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 6, marginBottom: -6 }}>
+            <button
+              data-penseat-btn=""
+              onClick={() => setShowTimeline((t) => !t)}
+              style={{ ...btnStyle, width: "auto", height: 20, padding: "0 8px", fontSize: 9, color: "#71717a" }}
+            >
+              {showTimeline ? "dials" : "timeline"}
+            </button>
+          </div>
+        )}
 
         {/* Layer tracks — hover a row to highlight its element on the page.
             Bleeds into the panel padding so the scrollbar sits at the panel
@@ -2013,6 +2495,110 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
           }}
         >
           <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: 8 }}>
+          {solo && !showTimeline ? (
+            /* ── Dial view — tune the motion, don't edit a timeline ── */
+            <div style={{ display: "flex", flexDirection: "column", gap: 14, padding: "6px 0 2px" }}>
+              {allInfos.map((info, idx) => (
+                <div key={idx} style={{ display: "flex", alignItems: "flex-end", gap: 16, flexWrap: "wrap" }}>
+                  {allInfos.length > 1 && (
+                    <span
+                      style={{
+                        alignSelf: "center",
+                        minWidth: 80,
+                        maxWidth: 140,
+                        color: "#71717a",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {info.name}
+                    </span>
+                  )}
+                  <DialField label="duration">
+                    <ScrubDial
+                      value={effDur(idx)}
+                      active={Math.round(effDur(idx)) !== Math.round(info.origDuration)}
+                      format={fmtTime}
+                      parse={parseDuration}
+                      onApply={(v) => applyDuration(idx, v)}
+                      min={50}
+                      max={30000}
+                      perPx={5}
+                    />
+                  </DialField>
+                  <DialField label="ease">
+                    <button
+                      title={`Easing: ${effEase(idx)} — click to change`}
+                      onClick={(e) => {
+                        const r = e.currentTarget.getBoundingClientRect();
+                        setEaseMenu((open) =>
+                          open?.idx === idx
+                            ? null
+                            : {
+                                idx,
+                                x: r.right,
+                                y: r.top - 6,
+                                custom: false,
+                                spring: edits.get(idx)?.spring ?? null,
+                                bezier: null,
+                              }
+                        );
+                      }}
+                      style={{
+                        ...dialBoxStyle,
+                        cursor: "pointer",
+                        color: effEase(idx) !== info.origEasing ? "#f4f4f5" : "#a1a1aa",
+                      }}
+                    >
+                      {easeLabel(effEase(idx))}
+                    </button>
+                  </DialField>
+                  {info.delay > 0 && (
+                    <DialField label="delay">
+                      <span style={{ ...dialBoxStyle, cursor: "default", color: "#71717a" }}>
+                        {fmtTime(info.delay)}
+                      </span>
+                    </DialField>
+                  )}
+                  {/* Amplitude — how far the motion goes, per property */}
+                  {info.tracks
+                    .filter((track) => {
+                      if (amplitudeNeutral(track) == null) return false;
+                      // Nothing to scale if every keyframe sits at neutral
+                      const n = amplitudeNeutral(track)!;
+                      return baselineTrackValues(idx, track).some(
+                        (raw) => scaleAbout(raw, n, 2) !== scaleAbout(raw, n, 1)
+                      );
+                    })
+                    .map((track) => {
+                      const k = amps.get(ampKey(idx, track)) ?? 1;
+                      return (
+                        <DialField key={track.prop} label={track.prop}>
+                          <ScrubDial
+                            value={Math.round(k * 100)}
+                            active={Math.round(k * 100) !== 100}
+                            format={(v) => `${v}%`}
+                            parse={(str) => {
+                              const n = parseFloat(str.replace("%", ""));
+                              return isFinite(n) ? n : null;
+                            }}
+                            onApply={(v) => applyAmplitude(idx, track, v / 100)}
+                            min={0}
+                            max={300}
+                            perPx={1}
+                          />
+                        </DialField>
+                      );
+                    })}
+                  {info.iterations === Infinity && (
+                    <span style={{ alignSelf: "center", color: "#52525b" }}>×∞</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+          <>
           {/* Single time indicator crossing every layer */}
           <div
             style={{
@@ -2024,6 +2610,9 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
               backgroundColor: "#f4f4f5",
               opacity: 0.5,
               pointerEvents: "none",
+              // Over the ruler bars (opaque, later in DOM), under the
+              // draggable keyframe ticks (zIndex 3)
+              zIndex: 2,
             }}
           />
           {(() => {
@@ -2046,6 +2635,9 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                 style={{
                   display: "flex",
                   flexDirection: "column",
+                  // Air between property rows — keyframe value labels hang
+                  // below each ruler and need clearance from the next lane
+                  gap: 6,
                   // Scroll container flex items collapse without this
                   flexShrink: 0,
                   // Section blocks get breathing room between each other
@@ -2080,7 +2672,6 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                     alignItems: "center",
                     gap: 6,
                     padding: "3px 0",
-                    marginBottom: 3,
                     flexShrink: 0,
                     color: hotHeader === si ? "#f4f4f5" : "#a1a1aa",
                     cursor: "pointer",
@@ -2144,11 +2735,14 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
               // Rows aren't a selection surface — the section header is the
               // entry point; rows stay focused on their own attribute
               title={`${layer.label} — ${info.name} — ${track.prop}`}
-              style={{ display: "flex", alignItems: "center", gap: LANE_GAP, flexShrink: 0 }}
+              // Top-aligned: label, lane ruler and chips all center on the
+              // row's first 18px, so the three columns share one line
+              style={{ display: "flex", alignItems: "flex-start", gap: LANE_GAP, flexShrink: 0 }}
             >
               <span
                 style={{
                   width: labelWidth,
+                  height: 18,
                   flexShrink: 0,
                   display: "flex",
                   alignItems: "center",
@@ -2203,14 +2797,18 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                 )}
               </span>
               <div style={{ position: "relative", flex: 1, height: 26 }}>
+                {/* Ruler-style lane: a bar with real thickness, centered on
+                    y=9 — the midline of the 18px label/chip columns beside it */}
                 <div
                   style={{
                     position: "absolute",
                     left: 0,
                     right: 0,
-                    top: 7,
-                    height: 1,
-                    backgroundColor: "#3f3f46",
+                    top: 5,
+                    height: 8,
+                    borderRadius: 2,
+                    backgroundColor: "#27272a",
+                    boxShadow: "inset 0 0 0 1px #3f3f46",
                   }}
                 />
                 {/* Active window of this animation on the scene timeline */}
@@ -2219,9 +2817,10 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                     position: "absolute",
                     left: `${(info.delay / span) * 100}%`,
                     width: `${(effDur(infoIdx) / span) * 100}%`,
-                    top: 7,
-                    height: 1,
-                    backgroundColor: "#52525b",
+                    top: 5,
+                    height: 8,
+                    borderRadius: 2,
+                    backgroundColor: "#3f3f46",
                   }}
                 />
                 {/* An expanded family keeps its lane empty — the children
@@ -2244,7 +2843,9 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                       e.preventDefault();
                       const lane = e.currentTarget.closest("div") as HTMLElement;
                       dragKf.current = { infoIdx, key: track.key, prop: track.prop, occ: i, lane, from: offset, moved: false, startX: e.clientX };
-                      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                      try {
+                        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                      } catch {}
                     },
                     onPointerMove: (e: React.PointerEvent) => {
                       const d = dragKf.current;
@@ -2311,12 +2912,15 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                         style={{
                           position: "absolute",
                           left: `${pct}%`,
-                          top: 7,
-                          transform: "translate(-50%, -50%) rotate(45deg)",
-                          width: 6,
-                          height: 6,
+                          top: 9,
+                          // Ruler tick, not the AE easing diamond — a vertical
+                          // line a touch taller than the bar it sits on
+                          transform: "translate(-50%, -50%)",
+                          width: 2,
+                          height: 12,
+                          borderRadius: 1,
                           // invisible padding = larger hit target
-                          padding: 6,
+                          padding: "4px 8px",
                           boxSizing: "content-box",
                           backgroundClip: "content-box",
                           backgroundColor: ACCENT,
@@ -2349,7 +2953,7 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                           style={{
                             position: "absolute",
                             left: `${pct}%`,
-                            top: 13,
+                            top: 15,
                             transform: "translateX(-50%)",
                             width: 76,
                             zIndex: 3,
@@ -2381,7 +2985,7 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                           style={{
                             position: "absolute",
                             left: `${pct}%`,
-                            top: 14,
+                            top: 16,
                             transform: "translateX(-50%)",
                             width: 10,
                             height: 10,
@@ -2400,7 +3004,7 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                           style={{
                             position: "absolute",
                             left: `${pct}%`,
-                            top: 13,
+                            top: 15,
                             transform: "translateX(-50%)",
                             maxWidth: 58,
                             overflow: "hidden",
@@ -2423,6 +3027,7 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                 onClick={(e) => e.stopPropagation()}
                 style={{
                   width: EDIT_COL,
+                  height: 18,
                   flexShrink: 0,
                   display: "flex",
                   alignItems: "center",
@@ -2514,7 +3119,11 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
               </div>
             ));
           })()}
+          </>
+          )}
           </div>
+        </div>
+        </div>
         </div>
         </div>
 

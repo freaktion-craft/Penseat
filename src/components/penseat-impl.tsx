@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import DrawingCanvas, { type DrawingCanvasHandle } from "./drawing-canvas";
 import PenseatBar, { type Corner } from "./penseat-bar";
-import ElementInspector, { type GrabbedElement, makeGrab, cancelRecorded, recordedElements } from "./element-inspector";
+import ElementInspector, { type GrabbedElement, makeGrab, cancelRecorded, recordedElements, ensureIntentAnimation } from "./element-inspector";
 import MotionPlayer, { EDIT_LOG, EDIT_REVEALED, subscribeEditLog, buildEditPrompt, buildBadgePrompt, revertEditBadge } from "./motion-player";
 import { captureAndCopy } from "@/lib/capture";
 
@@ -164,7 +164,9 @@ export type Tool = "pen" | "cursor";
 
 export default function Penseat() {
   const [mode, setMode] = useState<Mode>("idle");
-  const [tool, setTool] = useState<Tool>("pen");
+  // Opens on the inspector — annotating a live element is the common
+  // case; the pen is a key/click away
+  const [tool, setTool] = useState<Tool>("cursor");
   const [color, setColor] = useState("#ef4444");
   const [corner, setCorner] = useState<Corner>("rb");
   const [grabs, setGrabs] = useState<GrabbedElement[]>([]);
@@ -205,7 +207,7 @@ export default function Penseat() {
       canvasRef.current?.clear();
       setGrabs([]);
       setPlayerId(null);
-      setTool("pen");
+      setTool("cursor");
       setMode("idle");
     }
   }, [mode]);
@@ -277,6 +279,7 @@ export default function Penseat() {
       if (!isMeta && !e.shiftKey) {
         if (e.key === "x") clearAll();
         if (e.key === "v") setTool("cursor");
+        if (e.key === "b") setTool("pen");
         if (e.key === "e" || e.key === "5") pickColor("#ffffff");
         const idx = ["1", "2", "3", "4"].indexOf(e.key);
         if (idx !== -1) pickColor(COLORS[idx]);
@@ -301,13 +304,17 @@ export default function Penseat() {
         grabs={grabs}
         onGrab={(g, additive) => {
           setGrabs((prev) => (additive ? [...prev, g] : [g]));
-          // Live animations anywhere in the subtree → open the motion player
+          // Live animations anywhere in the subtree → open the motion player.
+          // Nothing live, but declared Framer Motion config on the fiber? Then
+          // rebuild that config as a real animation and drive it instead — the
+          // element is animating, just not anywhere the platform can see.
           const animated = (() => {
             try {
-              return g.el.getAnimations({ subtree: true }).length > 0;
+              if (g.el.getAnimations({ subtree: true }).length > 0) return true;
             } catch {
               return false;
             }
+            return ensureIntentAnimation(g.el);
           })();
           if (animated) setPlayerId(g.id);
           else if (!additive) setPlayerId(null); // replaced selection — old player target is gone
@@ -320,11 +327,13 @@ export default function Penseat() {
           setGrabs((prev) => prev.filter((g) => g.id === id));
           const g = grabs.find((x) => x.id === id);
           const animated = (() => {
+            if (!g) return false;
             try {
-              return !!g && g.el.getAnimations({ subtree: true }).length > 0;
+              if (g.el.getAnimations({ subtree: true }).length > 0) return true;
             } catch {
               return false;
             }
+            return ensureIntentAnimation(g.el);
           })();
           setPlayerId(animated ? id : null);
         }}

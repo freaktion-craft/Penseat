@@ -266,6 +266,221 @@ function motionPropsFor(el: Element): Record<string, any> | null {
   return null;
 }
 
+// ── Declared-intent playback ──
+//
+// Framer Motion runs transform keyframe sequences on its own rAF loop — it
+// composes x/rotate/scale into one transform string per frame and writes it
+// inline — so getAnimations() comes back empty and the player has nothing to
+// drive. The declared config is already on the fiber, though: exact values,
+// no sampling. Rebuilding it as a real WAAPI animation is both cheaper and
+// more faithful than recording what the loop happens to paint.
+//
+// Springs are left to the recorder — they have no authored duration to lay a
+// timeline over, so what actually happened on screen is the better source.
+
+// Motion applies transforms in a fixed order; the composed string has to
+// match it or the same values read as a different pose
+const TRANSFORM_ORDER = [
+  "x", "y", "z", "translateX", "translateY", "translateZ",
+  "scale", "scaleX", "scaleY",
+  "rotate", "rotateX", "rotateY", "rotateZ", "skewX", "skewY",
+];
+const TRANSFORM_FN: Record<string, string> = {
+  x: "translateX", y: "translateY", z: "translateZ",
+};
+const TRANSFORM_UNIT: Record<string, string> = {
+  x: "px", y: "px", z: "px",
+  translateX: "px", translateY: "px", translateZ: "px",
+  rotate: "deg", rotateX: "deg", rotateY: "deg", rotateZ: "deg",
+  skewX: "deg", skewY: "deg",
+};
+
+const EASE_CSS: Record<string, string> = {
+  linear: "linear",
+  easeIn: "ease-in", easeOut: "ease-out", easeInOut: "ease-in-out",
+  circIn: "cubic-bezier(0.55, 0, 1, 0.45)",
+  circOut: "cubic-bezier(0, 0.55, 0.45, 1)",
+  circInOut: "cubic-bezier(0.85, 0, 0.15, 1)",
+  backIn: "cubic-bezier(0.36, 0, 0.66, -0.56)",
+  backOut: "cubic-bezier(0.34, 1.56, 0.64, 1)",
+  backInOut: "cubic-bezier(0.68, -0.6, 0.32, 1.6)",
+  anticipate: "cubic-bezier(0.36, 0, 0.66, -0.56)",
+};
+
+function cssEase(ease: any): string {
+  if (Array.isArray(ease) && ease.length === 4 && ease.every((n) => typeof n === "number"))
+    return `cubic-bezier(${ease.join(", ")})`;
+  if (typeof ease === "string" && EASE_CSS[ease]) return EASE_CSS[ease];
+  // Motion's default for a keyframe array
+  return "ease-in-out";
+}
+
+// Motion runs a single `ease` between each pair of keyframes, not once across
+// the whole cycle. Easing the effect instead would trace the same path at the
+// wrong pace — with x: [0, 64, 0] over 2.4s, effect-level ease-in-out puts the
+// square at 16.5px where Motion has it at 32px. An `ease` array is per-segment
+// already, except for the [x1, y1, x2, y2] form, which is one bezier.
+function segmentEases(ease: any, segments: number): string[] {
+  const perSegment =
+    Array.isArray(ease) &&
+    !(ease.length === 4 && ease.every((n: any) => typeof n === "number"));
+  if (perSegment)
+    return Array.from({ length: segments }, (_, i) =>
+      cssEase(ease[Math.min(i, ease.length - 1)])
+    );
+  const one = cssEase(ease);
+  return Array.from({ length: segments }, () => one);
+}
+
+// Where each frame of a property sits on the timeline — evenly spread unless
+// the config supplied its own `times`
+function offsetsFor(frames: any[], times: number[] | null): number[] {
+  if (times && times.length === frames.length) return times;
+  return frames.map((_, i) => i / (frames.length - 1));
+}
+
+// Transform components share one string per keyframe, so a property whose own
+// frames don't land on a shared offset has to be read between them
+function sampleAt(frames: any[], offs: number[], o: number): any {
+  const i = offs.findIndex((x) => x >= o);
+  if (i === -1) return frames[frames.length - 1];
+  if (i === 0) return frames[0];
+  const a = frames[i - 1];
+  const b = frames[i];
+  if (typeof a !== "number" || typeof b !== "number")
+    return offs[i] === o ? b : a;
+  const span = offs[i] - offs[i - 1];
+  return span > 0 ? a + (b - a) * ((o - offs[i - 1]) / span) : b;
+}
+
+function intentAnimation(el: Element): Animation | null {
+  const p = motionPropsFor(el);
+  if (!p) return null;
+  const target =
+    typeof p.animate === "string" ? p.variants?.[p.animate] : p.animate;
+  if (!target || typeof target !== "object" || Array.isArray(target)) return null;
+
+  const t = { ...(p.transition ?? {}), ...(target.transition ?? {}) };
+  if (t.type === "spring" || t.stiffness != null || t.damping != null) return null;
+  const duration = (typeof t.duration === "number" ? t.duration : 0.3) * 1000;
+  if (!(duration > 0)) return null;
+  const times = Array.isArray(t.times) ? t.times : null;
+
+  // A lone target value means "animate from wherever it is now" — there is no
+  // authored start, so there is no timeline to lay out
+  const transforms: [string, any[]][] = [];
+  const plain: [string, any[]][] = [];
+  for (const [key, raw] of Object.entries(target)) {
+    if (key === "transition") continue;
+    const frames = Array.isArray(raw) ? raw : [raw];
+    if (frames.length < 2) continue;
+    (TRANSFORM_ORDER.includes(key) ? transforms : plain).push([key, frames]);
+  }
+  if (!transforms.length && !plain.length) return null;
+
+  const byOffset = new Map<number, Keyframe>();
+  const at = (o: number): any => {
+    let k = byOffset.get(o);
+    if (!k) {
+      k = { offset: o };
+      byOffset.set(o, k);
+    }
+    return k;
+  };
+
+  if (transforms.length) {
+    const union = new Set<number>();
+    for (const [, frames] of transforms)
+      for (const o of offsetsFor(frames, times)) union.add(o);
+    for (const o of union) {
+      const parts: string[] = [];
+      for (const name of TRANSFORM_ORDER) {
+        const entry = transforms.find(([k]) => k === name);
+        if (!entry) continue;
+        const v = sampleAt(entry[1], offsetsFor(entry[1], times), o);
+        const unit = typeof v === "number" ? TRANSFORM_UNIT[name] ?? "" : "";
+        parts.push(`${TRANSFORM_FN[name] ?? name}(${v}${unit})`);
+      }
+      if (parts.length) at(o).transform = parts.join(" ");
+    }
+  }
+  // Non-transform properties keep their own offsets — WAAPI interpolates a
+  // property across the keyframes that mention it, so they need no filling in
+  for (const [name, frames] of plain) {
+    const offs = offsetsFor(frames, times);
+    const camel = name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+    frames.forEach((v, i) => {
+      at(offs[i])[camel] = v;
+    });
+  }
+
+  const kfs = [...byOffset.values()].sort(
+    (a, b) => (a.offset as number) - (b.offset as number)
+  );
+
+  // Authored segment boundaries come from whichever property carries the most
+  // frames; a keyframe inherits the easing of the segment its offset falls in.
+  // Properties with differing frame counts add offsets between boundaries, and
+  // those sub-segments repeat their parent's easing — an approximation, but one
+  // that stays exact in the ordinary case where the frame counts agree.
+  const authored = [...transforms, ...plain].reduce<any[]>(
+    (most, [, frames]) => (frames.length > most.length ? frames : most),
+    []
+  );
+  const bounds = offsetsFor(authored, times);
+  const eases = segmentEases(t.ease, Math.max(1, bounds.length - 1));
+  kfs.forEach((k, i) => {
+    if (i === kfs.length - 1) return;
+    const next = bounds.findIndex((b) => b > (k.offset as number));
+    k.easing = eases[Math.min(Math.max(0, next - 1), eases.length - 1)];
+  });
+
+  try {
+    const anim = new Animation(
+      new KeyframeEffect(el, kfs, {
+        duration,
+        delay: (typeof t.delay === "number" ? t.delay : 0) * 1000,
+        // The easing lives on the keyframes, the way CSS does it
+        easing: "linear",
+        fill: "both",
+        iterations:
+          t.repeat === Infinity
+            ? Infinity
+            : typeof t.repeat === "number"
+              ? t.repeat + 1
+              : 1,
+        direction:
+          t.repeatType === "reverse" || t.repeatType === "mirror"
+            ? "alternate"
+            : "normal",
+      })
+    );
+    anim.id = `declared · ${[...transforms, ...plain].map(([k]) => k).join(", ")}`;
+    return anim;
+  } catch {
+    return null;
+  }
+}
+
+// Give the player something to drive when the platform exposes nothing.
+// Registered alongside recordings so releasing the grab releases this too —
+// and once it exists, Motion's inline writes are outranked by it, so the
+// element keeps moving to the same config the player is now scrubbing.
+export function ensureIntentAnimation(el: Element): boolean {
+  try {
+    if (el.getAnimations({ subtree: true }).length) return false;
+  } catch {
+    return false;
+  }
+  const anim = intentAnimation(el);
+  if (!anim) return false;
+  RECORDED.set(el, [...(RECORDED.get(el) ?? []), anim]);
+  try {
+    anim.play();
+  } catch {}
+  return true;
+}
+
 function fmtMotionValue(v: any): string {
   if (typeof v === "string") return `"${v}"`;
   if (Array.isArray(v)) return `[${v.join("→")}]`;
@@ -992,18 +1207,9 @@ export default function ElementInspector({
       )}
 
       {/* Hover highlight — penseat UI, excluded from capture */}
-      {picking && arming === null && hover && (() => {
-        // The label normally sits above the box — the same anchor spec
-        // cards use. When a selected element's card is up there (top-
-        // aligned neighbor or wrapper), drop the label below the box
-        // instead of overprinting the card.
-        const flip = grabs.some((g) => {
-          // Cards stack upward from the outline top, so the collision
-          // zone reaches higher than the hover label's single line
-          const dy = hover.top - (g.y - window.scrollY);
-          return dy > -96 && dy < 24 && Math.abs(g.x - window.scrollX - hover.left) < 320;
-        });
-        return (
+      {/* Hover is outline-only — the black label card belongs to selection,
+          where the spec card carries it along with the timing readout */}
+      {picking && arming === null && hover && (
         <div
           data-penseat="hover"
           style={{
@@ -1018,28 +1224,8 @@ export default function ElementInspector({
             backgroundColor: "rgba(14,165,233,0.08)",
             borderRadius: 6,
           }}
-        >
-          <span
-            style={{
-              position: "absolute",
-              left: -1.5,
-              ...(flip
-                ? { top: "100%", marginTop: 4 }
-                : { bottom: "100%", marginBottom: 4 }),
-              whiteSpace: "nowrap",
-              backgroundColor: "#18181b",
-              borderRadius: 4,
-              padding: "2px 6px",
-              fontFamily: "monospace",
-              fontSize: 11,
-              color: "#e4e4e7",
-            }}
-          >
-            {`${hover.label} ${hover.size}`}
-          </span>
-        </div>
-        );
-      })()}
+        />
+      )}
 
       {/* Layer buttons + menus — penseat UI, sits above the pick layer so
           it stays clickable in any tool mode */}

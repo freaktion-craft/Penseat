@@ -58,6 +58,7 @@ export default function Layout({ children }) {
 | Key | Action |
 |-----|--------|
 | `Cmd+Shift+D` | Toggle drawing mode |
+| `B` | Pen (brush) |
 | `V` | Inspect element (cursor) |
 | `K` | Play / pause the motion player |
 | `O` | Toggle onion skin |
@@ -112,12 +113,13 @@ whole subtree and shows every animated element as a **layer**:
 - **Scrubber** — drag to any point in the scene; every layer follows,
   staggers included
 - **Onion skin** — pauses the scene and overlays ghost frames of each
-  animated layer, sampled across that layer's own delay-to-end window.
-  Layers that move leave a fading trail in place; layers that animate
-  without moving (opacity pulses, color cycles) get their frames laid
-  out as a dashed filmstrip below the element instead. Ghosts and
-  strips are part of the copied screenshot, so an LLM can see the
-  motion in a single still image.
+  animated layer: three steps before the paused instant and three after,
+  a slice of the motion either side of where you stopped rather than a
+  summary of the whole cycle. Layers that move leave a fading trail in
+  place; layers that animate without moving (opacity pulses, color
+  cycles) get their frames laid out as a dashed filmstrip below the
+  element instead. Ghosts and strips are part of the copied screenshot,
+  so an LLM can see the motion in a single still image.
 
 Inspect a whole section for scene debugging, a single element for focused
 debugging, or a small composite (like a typing indicator) to see its
@@ -148,6 +150,21 @@ to edit, even when the animation itself runs on a JS loop the platform
 can't expose. Spec cards and prompts also name the nearest React
 component (`<MorphCard>`), so the paste-to-LLM flow points at source,
 not just at DOM.
+
+That config also drives the player. Motion composes `x` / `rotate` / `scale`
+into one transform string and writes it inline every frame, so
+`getAnimations()` is empty and there is nothing to scrub — but the declared
+keyframes and timing are right there on the fiber. Selecting such an element
+rebuilds them as a real animation (exact values, no sampling) and docks the
+player, so `animate={{ x: [0, 64, 0] }}` scrubs like any CSS animation.
+Releasing the selection cancels it and hands the element back to Motion.
+
+The easing goes on the keyframes, not the effect — Motion runs a single `ease`
+between each pair of keyframes rather than once across the cycle, and easing
+the effect instead would trace the same path at the wrong pace.
+
+Springs are the exception: with no authored duration there is no timeline to
+lay out, so they stay on the recorder, which samples what actually happened.
 
 ### Live timing edits
 

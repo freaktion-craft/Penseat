@@ -11,89 +11,75 @@
   }
 }
 
-/* Demo animation for the motion card — travels far enough to show
-   onion skinning, and animates two properties for the timeline */
-@keyframes demo-slide {
-  0%, 100% {
-    transform: translateX(0);
-    opacity: 1;
-  }
-  50% {
-    transform: translateX(160px);
-    opacity: 0.35;
-  }
+/* Demo stage — see app/page.tsx. One 4.2s loop shared by four layers; the
+   phase boundaries below line up across all of them:
+
+     0–24%   roll in          (slow out: decelerates to a crawl, not a stop)
+    24–29%   anticipation     (a squash before the launch, still creeping)
+    29–43%   big hop          (0.6s in the air)
+    43–53%   second hop       (0.41s)      x keeps moving at a constant
+    53–60%   third hop        (0.27s)      ~210px/s through all three, so
+    60–70%   settle                        the hops trace forward arcs
+    70–100%  roll out         (slow in: accelerates away)
+
+   Hop durations scale with the square root of their height, like a real
+   bounce, and each half is a true parabola: ease-out-quad on the way up,
+   ease-in-quad on the way down. Longer hangs read as gravity switching off.
+
+   Easing is set per keyframe (it applies to the segment that keyframe
+   starts), which is what gives each hop an arc: ease-out going up, ease-in
+   coming down. */
+
+@keyframes ball-travel {
+  0%    { transform: translateX(-400px); animation-timing-function: cubic-bezier(0.15, 0.7, 0.3, 1); }
+  24%   { transform: translateX(-160px); animation-timing-function: linear; }
+  29%   { transform: translateX(-150px); animation-timing-function: linear; }
+  59.5% { transform: translateX(120px);  animation-timing-function: cubic-bezier(0.2, 0.7, 0.4, 1); }
+  70%   { transform: translateX(150px);  animation-timing-function: cubic-bezier(0.7, 0, 0.85, 0.35); }
+  100%  { transform: translateX(400px); }
 }
 
-/* Motion playground — each animates a different kind of property */
-@keyframes demo-float {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-12px);
-  }
-}
-@keyframes demo-wiggle {
-  0%, 100% {
-    transform: rotate(0deg);
-  }
-  20% {
-    transform: rotate(14deg);
-  }
-  40% {
-    transform: rotate(-12deg);
-  }
-  60% {
-    transform: rotate(8deg);
-  }
-  80% {
-    transform: rotate(-6deg);
-  }
-}
-@keyframes demo-progress {
-  0% {
-    transform: scaleX(0.05);
-  }
-  60% {
-    transform: scaleX(1);
-  }
-  100% {
-    transform: scaleX(0.05);
-  }
-}
-@keyframes demo-blink {
-  0%, 80%, 100% {
-    opacity: 0.2;
-  }
-  40% {
-    opacity: 1;
-  }
-}
-@keyframes demo-color {
-  0%, 100% {
-    background-color: #6366f1;
-    transform: scale(1);
-  }
-  50% {
-    background-color: #ec4899;
-    transform: scale(1.25);
-  }
-}
-@keyframes demo-orbit {
-  0% {
-    transform: rotate(0deg) translateX(26px) rotate(0deg);
-  }
-  100% {
-    transform: rotate(360deg) translateX(26px) rotate(-360deg);
-  }
+/* Rolling: rotation is x / radius (28px), keyframe for keyframe with the
+   travel above and on the same curves, so the spin always matches the
+   ground speed — including through the hops, where a real ball keeps
+   turning at the rate it left the floor with */
+@keyframes ball-roll {
+  0%    { transform: rotate(-818deg); animation-timing-function: cubic-bezier(0.15, 0.7, 0.3, 1); }
+  24%   { transform: rotate(-327deg); animation-timing-function: linear; }
+  29%   { transform: rotate(-307deg); animation-timing-function: linear; }
+  59.5% { transform: rotate(246deg);  animation-timing-function: cubic-bezier(0.2, 0.7, 0.4, 1); }
+  70%   { transform: rotate(307deg);  animation-timing-function: cubic-bezier(0.7, 0, 0.85, 0.35); }
+  100%  { transform: rotate(818deg); }
 }
 
-@keyframes demo-svg-slide {
-  0%,
-  100% {
-    transform: translateX(0);
-  }
-  50% {
-    transform: translateX(76px);
-  }
+@keyframes ball-hop {
+  0%, 29% { transform: translateY(0);      animation-timing-function: cubic-bezier(0.5, 1, 0.89, 1); }
+  36.1%   { transform: translateY(-130px); animation-timing-function: cubic-bezier(0.11, 0, 0.5, 0); }
+  43.3%   { transform: translateY(0);      animation-timing-function: cubic-bezier(0.5, 1, 0.89, 1); }
+  48.2%   { transform: translateY(-62px);  animation-timing-function: cubic-bezier(0.11, 0, 0.5, 0); }
+  53.1%   { transform: translateY(0);      animation-timing-function: cubic-bezier(0.5, 1, 0.89, 1); }
+  56.3%   { transform: translateY(-26px);  animation-timing-function: cubic-bezier(0.11, 0, 0.5, 0); }
+  59.5%, 100% { transform: translateY(0); }
+}
+
+/* Squash on every contact, stretch along the direction of travel in the
+   air, and a wind-up squash before the launch. Volume roughly conserved:
+   x and y scales move against each other. */
+@keyframes ball-squash {
+  0%, 22% { transform: scale(1, 1); }
+  26%     { transform: scale(1.16, 0.8); }    /* anticipation */
+  29.5%   { transform: scale(0.86, 1.2); }    /* takeoff stretch */
+  36.1%   { transform: scale(1, 1); }         /* apex */
+  42.3%   { transform: scale(0.88, 1.16); }   /* descent stretch */
+  43.3%   { transform: scale(1.32, 0.64); }   /* impact */
+  44.8%   { transform: scale(0.9, 1.12); }    /* rebound */
+  48.2%   { transform: scale(1, 1); }
+  52.4%   { transform: scale(0.93, 1.09); }
+  53.1%   { transform: scale(1.2, 0.78); }    /* impact 2 */
+  54.3%   { transform: scale(0.95, 1.06); }
+  56.3%   { transform: scale(1, 1); }
+  59.1%   { transform: scale(0.97, 1.04); }
+  59.5%   { transform: scale(1.1, 0.88); }    /* impact 3 */
+  61%     { transform: scale(0.99, 1.02); }
+  63%, 100% { transform: scale(1, 1); }
 }
