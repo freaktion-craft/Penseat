@@ -162,11 +162,11 @@ function BadgePopover({ el, onClose }: { el: Element; onClose: () => void }) {
 type Mode = "idle" | "drawing" | "capturing";
 export type Tool = "pen" | "cursor";
 
-export default function Penseat() {
+export default function Penseat({ defaultTool = "cursor" }: { defaultTool?: Tool } = {}) {
   const [mode, setMode] = useState<Mode>("idle");
-  // Opens on the inspector — annotating a live element is the common
-  // case; the pen is a key/click away
-  const [tool, setTool] = useState<Tool>("cursor");
+  // Opens on the inspector by default — annotating a live element is the
+  // common case; a sketchbook page passes defaultTool="pen"
+  const [tool, setTool] = useState<Tool>(defaultTool);
   const [color, setColor] = useState("#ef4444");
   const [corner, setCorner] = useState<Corner>("rb");
   const [grabs, setGrabs] = useState<GrabbedElement[]>([]);
@@ -207,7 +207,7 @@ export default function Penseat() {
       canvasRef.current?.clear();
       setGrabs([]);
       setPlayerId(null);
-      setTool("cursor");
+      setTool(defaultTool);
       setMode("idle");
     }
   }, [mode]);

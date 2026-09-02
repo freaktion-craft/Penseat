@@ -476,6 +476,7 @@ function ToolBtn({ active, onClick, pressed, icon, label, shortcut }: { active: 
           aria-label={label}
           onClick={onClick}
           style={{
+            position: 'relative',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -494,6 +495,25 @@ function ToolBtn({ active, onClick, pressed, icon, label, shortcut }: { active: 
           }}
         >
           {icon}
+          {/* Selected marker: a short bar under the icon. Hover and selected
+              share the filled look, so without this the tool you're hovering
+              reads exactly like the tool you're on. */}
+          {active && (
+            <span
+              aria-hidden
+              style={{
+                position: 'absolute',
+                bottom: 3,
+                left: '50%',
+                width: 12,
+                height: 2,
+                marginLeft: -6,
+                borderRadius: 1,
+                backgroundColor: 'rgba(244,244,245,0.7)',
+                pointerEvents: 'none',
+              }}
+            />
+          )}
         </button>
       </WithTooltip>
     </div>

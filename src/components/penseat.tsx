@@ -18,7 +18,13 @@ const PenseatImpl =
     ? lazy(() => import("./penseat-impl"))
     : null;
 
-export default function Penseat() {
+export type PenseatProps = {
+  // Tool the overlay opens on. "cursor" inspects elements; "pen" draws —
+  // the right default for a page that exists to be drawn on.
+  defaultTool?: "cursor" | "pen";
+};
+
+export default function Penseat({ defaultTool }: PenseatProps = {}) {
   // Client-only mount — a devtool gains nothing from SSR, and skipping
   // the streamed Suspense segment avoids framework reveal-script quirks
   // that can leave the overlay stuck hidden.
@@ -27,7 +33,7 @@ export default function Penseat() {
   if (!PenseatImpl || !mounted) return null;
   return (
     <Suspense fallback={null}>
-      <PenseatImpl />
+      <PenseatImpl defaultTool={defaultTool} />
     </Suspense>
   );
 }

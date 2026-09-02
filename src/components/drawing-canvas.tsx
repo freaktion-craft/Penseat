@@ -83,16 +83,25 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
       if (!canvas) return;
 
       const dpr = window.devicePixelRatio || 1;
+      // clientWidth/Height are included because embedded viewers can report
+      // window.innerWidth/Height as 0; on a page with no in-flow content the
+      // scroll sizes are 0 too, and a 0×0 canvas makes every drawImage into
+      // it throw InvalidStateError
       const docWidth = Math.max(
         document.documentElement.scrollWidth,
         document.body.scrollWidth,
+        document.documentElement.clientWidth,
         window.innerWidth
       );
       const docHeight = Math.max(
         document.documentElement.scrollHeight,
         document.body.scrollHeight,
+        document.documentElement.clientHeight,
         window.innerHeight
       );
+      // Nothing to size against yet — keep whatever size we have rather
+      // than commit a zero-area canvas
+      if (!docWidth || !docHeight) return;
 
       canvas.width = docWidth * dpr;
       canvas.height = docHeight * dpr;
@@ -209,7 +218,7 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
 
     function rebuildCache() {
       const main = canvasRef.current;
-      if (!main) return;
+      if (!main || !main.width || !main.height) return;
       const cache = getCacheCanvas();
       const ctx = cache.getContext("2d")!;
       const dpr = window.devicePixelRatio || 1;
@@ -223,6 +232,8 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
     }
 
     function appendToCache(stroke: Stroke) {
+      const main = canvasRef.current;
+      if (!main || !main.width || !main.height) return;
       const cache = getCacheCanvas();
       const ctx = cache.getContext("2d")!;
       const dpr = window.devicePixelRatio || 1;
@@ -283,7 +294,9 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
 
     function compositeToScreen() {
       const canvas = canvasRef.current;
-      if (!canvas) return;
+      // A zero-area canvas can't be drawn into (InvalidStateError) — and
+      // there is nothing to show on it anyway
+      if (!canvas || !canvas.width || !canvas.height) return;
       const ctx = canvas.getContext("2d")!;
       const dpr = window.devicePixelRatio || 1;
 

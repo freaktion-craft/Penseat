@@ -53,6 +53,12 @@ export default function Layout({ children }) {
 }
 ```
 
+### Props
+
+| Prop | Default | |
+|------|---------|--|
+| `defaultTool` | `"cursor"` | Tool the overlay opens on. `"cursor"` inspects elements; `"pen"` draws. A page that exists to be drawn on — a sketchbook, a playground — wants `<Penseat defaultTool="pen" />`. |
+
 ## Shortcuts
 
 | Key | Action |
