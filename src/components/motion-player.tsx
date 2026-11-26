@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useMemo, type ReactNode } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { type GrabbedElement, labelFor, midTruncate, componentNameFor, describeMotionIntent } from "./element-inspector";
 
@@ -10,7 +10,6 @@ const MAX_GHOST_LAYERS = 6;
 const PANEL_BG = "#18181b";
 const LANE_GAP = 14; // space between the label column and the timelines
 const ACCENT = "#e4e4e7";
-const ACCENT_DIM = "#a1a1aa";
 
 // ── Icons (from Lucide, inlined) ──
 const iconProps = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
@@ -958,16 +957,7 @@ const dialBoxStyle: React.CSSProperties = {
   textAlign: "center",
 };
 
-function DialField({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <span style={{ display: "inline-flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontSize: 9, color: "#71717a" }}>{label}</span>
-      {children}
-    </span>
-  );
-}
-
-function ScrubDial({ value, active, format, parse, onApply, min, max, perPx }: {
+function ScrubDial({ value, active, format, parse, onApply, min, max, perPx, bare }: {
   value: number;
   // Edited away from the original — brightens like the timeline chips
   active: boolean;
@@ -978,7 +968,10 @@ function ScrubDial({ value, active, format, parse, onApply, min, max, perPx }: {
   max: number;
   // Value change per horizontal pixel of drag
   perPx: number;
+  // Unboxed: reads as plain text in a table cell, a soft fill on hover
+  bare?: boolean;
 }) {
+  const box = bare ? bareDialStyle : dialBoxStyle;
   const [editing, setEditing] = useState(false);
   const drag = useRef<{ startX: number; base: number; moved: boolean } | null>(null);
   const clamp = (v: number) => Math.min(max, Math.max(min, Math.round(v)));
@@ -1003,8 +996,8 @@ function ScrubDial({ value, active, format, parse, onApply, min, max, perPx }: {
           setEditing(false);
         }}
         style={{
-          ...dialBoxStyle,
-          width: 90,
+          ...box,
+          width: bare ? 64 : 90,
           borderColor: "rgba(255,255,255,0.35)",
           color: "#f4f4f5",
           userSelect: "text",
@@ -1037,15 +1030,272 @@ function ScrubDial({ value, active, format, parse, onApply, min, max, perPx }: {
         // A clean click (no sweep) opens exact entry
         if (d && !d.moved) setEditing(true);
       }}
+      {...(bare ? { "data-penseat-dial": "" } : {})}
       style={{
-        ...dialBoxStyle,
+        ...box,
         cursor: "ew-resize",
         touchAction: "none",
-        color: active ? "#f4f4f5" : "#a1a1aa",
-        ...(active ? { borderColor: "rgba(255,255,255,0.3)" } : {}),
+        color: active ? "#fafafa" : bare ? "#d4d4d8" : "#a1a1aa",
+        ...(active && !bare ? { borderColor: "rgba(255,255,255,0.3)" } : {}),
       }}
     >
       {format(value)}
+    </span>
+  );
+}
+
+
+// Table-cell flavor of the dial: no box, the value is the control. Pulled
+// left by its padding so the digits line up with the column header.
+const bareDialStyle: React.CSSProperties = {
+  ...dialBoxStyle,
+  minWidth: 0,
+  height: 22,
+  padding: "0 6px",
+  marginLeft: -6,
+  justifyContent: "flex-start",
+  borderColor: "transparent",
+  backgroundColor: "transparent",
+  borderRadius: 5,
+};
+
+const SANS = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+
+// Dial view geometry — shared with the timeline's body height so the
+// two views swap without the panel growing or shrinking
+const TRACKS_MAX_H = 190;
+const DIAL_PAD = 4;
+const DIAL_HEAD_H = 22;
+const DIAL_ROW_H = 36;
+
+// ── Dial view: the motion as a curve ──
+//
+// Each row draws its property's value over one cycle, so a 120% hop looks
+// taller before you even press play. Sampled by replaying the keyframes on
+// a hidden probe (margin-left carries the number), so per-keyframe easing,
+// steps and springs all come out exactly as the browser runs them.
+
+const CURVE_SAMPLES = 96;
+const curveCache = new Map<string, number[] | null>();
+let curveProbe: HTMLDivElement | null = null;
+
+// The number a track holds at one keyframe — its own slot of a split
+// transform, opacity, or any plain length/number. null: not plottable.
+function trackNumber(raw: string, track: PropTrack): number | null {
+  let v = raw;
+  if (track.slot != null && track.sig) {
+    const parsed = parseTransformList(raw);
+    if (!parsed) return null;
+    v = parsed.length === 0
+      ? TRANSFORM_IDENTITY[track.sig[track.slot]] ?? ""
+      : parsed[track.slot]?.arg ?? "";
+    v = v.split(",")[track.argIndex ?? 0] ?? "";
+  }
+  const m = /^\s*(-?\d*\.?\d+)([a-z%]*)\s*$/i.exec(v);
+  return m ? parseFloat(m[1]) : null;
+}
+
+function sampleCurve(
+  keyframes: ComputedKeyframe[],
+  track: PropTrack,
+  effectEasing: string
+): number[] | null {
+  if (typeof document === "undefined") return null;
+  const frames: Keyframe[] = [];
+  for (const kf of keyframes) {
+    if (kf[track.key] == null) continue;
+    const n = trackNumber(String(kf[track.key]), track);
+    if (n == null) return null;
+    // Screen y grows downward; up should read as up
+    const v = track.prop.startsWith("y position") ? -n : n;
+    frames.push({
+      offset: (kf.computedOffset ?? kf.offset ?? 0) as number,
+      easing: kf.easing ?? "linear",
+      marginLeft: `${v * 100}px`,
+    });
+  }
+  if (frames.length < 2) return null;
+  const key = JSON.stringify(frames) + effectEasing;
+  if (curveCache.has(key)) return curveCache.get(key)!;
+  if (!curveProbe || !curveProbe.isConnected) {
+    curveProbe = document.createElement("div");
+    curveProbe.setAttribute("data-penseat", "curve-probe");
+    curveProbe.setAttribute("aria-hidden", "true");
+    Object.assign(curveProbe.style, {
+      position: "fixed", left: "-99px", top: "0", width: "1px", height: "1px",
+      visibility: "hidden", pointerEvents: "none", contain: "strict",
+    });
+    document.body.appendChild(curveProbe);
+  }
+  let out: number[] | null = [];
+  let probe: Animation | null = null;
+  try {
+    probe = curveProbe.animate(frames, { duration: 1000, fill: "both", easing: effectEasing });
+    probe.pause();
+    const cs = getComputedStyle(curveProbe);
+    for (let i = 0; i <= CURVE_SAMPLES; i++) {
+      probe.currentTime = (i / CURVE_SAMPLES) * 1000;
+      out.push(parseFloat(cs.marginLeft) / 100);
+    }
+    if (out.some((n) => !isFinite(n))) out = null;
+  } catch {
+    out = null;
+  }
+  probe?.cancel();
+  if (curveCache.size > 300) curveCache.clear();
+  curveCache.set(key, out);
+  return out;
+}
+
+function MotionCurve({ cur, orig, progress, onSeek }: {
+  cur: number[];
+  // The baseline, drawn faint behind an edited curve
+  orig: number[] | null;
+  progress: number;
+  onSeek: (p: number) => void;
+}) {
+  const H = 22;
+  const all = orig ? [...cur, ...orig] : cur;
+  const lo = Math.min(...all);
+  const hi = Math.max(...all);
+  const range = hi - lo;
+  const y = (v: number) => (range < 1e-6 ? H / 2 : 2 + (1 - (v - lo) / range) * (H - 4));
+  const path = (vals: number[]) =>
+    vals.map((v, i) => `${i ? "L" : "M"}${((i / (vals.length - 1)) * 100).toFixed(2)} ${y(v).toFixed(2)}`).join(" ");
+  const n = cur.length - 1;
+  const p = Math.min(1, Math.max(0, progress));
+  const fi = p * n;
+  const i0 = Math.floor(fi);
+  const at = cur[i0] + (cur[Math.min(n, i0 + 1)] - cur[i0]) * (fi - i0);
+  const played = cur.slice(0, i0 + 1).concat(at);
+  const playedPath = played
+    .map((v, i) => {
+      const x = i === played.length - 1 ? p * 100 : (i / n) * 100;
+      return `${i ? "L" : "M"}${x.toFixed(2)} ${y(v).toFixed(2)}`;
+    })
+    .join(" ");
+  const seekFrom = (e: React.PointerEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    onSeek(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)));
+  };
+  const line = { fill: "none", vectorEffect: "non-scaling-stroke" as const, strokeLinejoin: "round" as const, strokeLinecap: "round" as const };
+  return (
+    <div
+      title="Drag to scrub"
+      onPointerDown={(e) => {
+        try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+        seekFrom(e);
+      }}
+      onPointerMove={(e) => {
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) seekFrom(e);
+      }}
+      style={{ position: "relative", width: "100%", height: H, cursor: "ew-resize", touchAction: "none" }}
+    >
+      <svg width="100%" height={H} viewBox={`0 0 100 ${H}`} preserveAspectRatio="none" style={{ position: "absolute", inset: 0, overflow: "visible" }}>
+        {orig && <path d={path(orig)} {...line} stroke="rgba(255,255,255,0.16)" strokeWidth={1.25} strokeDasharray="2 3" />}
+        <path d={path(cur)} {...line} stroke="rgba(255,255,255,0.3)" strokeWidth={1.25} />
+        <path d={playedPath} {...line} stroke="#e4e4e7" strokeWidth={1.5} />
+      </svg>
+      <div style={{ position: "absolute", left: `${p * 100}%`, top: -4, bottom: -4, width: 1, marginLeft: -0.5, backgroundColor: "rgba(255,255,255,0.18)", pointerEvents: "none" }} />
+      <div style={{ position: "absolute", left: `${p * 100}%`, top: y(at), width: 5, height: 5, margin: "-2.5px 0 0 -2.5px", borderRadius: 999, backgroundColor: "#fafafa", pointerEvents: "none" }} />
+    </div>
+  );
+}
+
+// How far the motion goes, 0–300%, with a notch at 100%. Snaps to 100
+// when it passes near, so getting back to the original is easy.
+function AmountSlider({ value, onApply }: { value: number; onApply: (v: number) => void }) {
+  const MAX = 300;
+  const set = (e: React.PointerEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    let v = Math.round(((e.clientX - r.left) / r.width) * MAX);
+    v = Math.min(MAX, Math.max(0, v));
+    if (Math.abs(v - 100) <= 6) v = 100;
+    onApply(v);
+  };
+  const f = Math.min(1, Math.max(0, value / MAX)) * 100;
+  return (
+    <div
+      onPointerDown={(e) => {
+        e.preventDefault();
+        try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+        set(e);
+      }}
+      onPointerMove={(e) => {
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) set(e);
+      }}
+      style={{ position: "relative", flex: "none", width: 64, height: 18, cursor: "pointer", touchAction: "none" }}
+    >
+      <div style={{ position: "absolute", left: 0, right: 0, top: 8, height: 2, borderRadius: 2, backgroundColor: "rgba(255,255,255,0.1)" }} />
+      <div style={{ position: "absolute", left: `${100 / 3}%`, top: 5, width: 1, height: 8, backgroundColor: "rgba(255,255,255,0.25)" }} />
+      <div style={{ position: "absolute", left: 0, width: `${f}%`, top: 8, height: 2, borderRadius: 2, backgroundColor: "rgba(255,255,255,0.45)" }} />
+      <div style={{ position: "absolute", left: `${f}%`, top: 4, width: 10, height: 10, marginLeft: -5, borderRadius: 999, backgroundColor: "#f4f4f5" }} />
+    </div>
+  );
+}
+
+const PRESET_BEZIERS: Record<string, Bezier> = {
+  ease: [0.25, 0.1, 0.25, 1],
+  "ease-in": [0.42, 0, 1, 1],
+  "ease-out": [0, 0, 0.58, 1],
+  "ease-in-out": [0.42, 0, 0.58, 1],
+};
+
+// A thumbnail of the easing curve beside its name
+function EaseGlyph({ easing }: { easing: string }) {
+  const W = 14, H = 10;
+  let d: string;
+  const bz = easing.startsWith("cubic-bezier") ? parseBezier(easing) : PRESET_BEZIERS[easing];
+  if (bz) {
+    const X = (x: number) => (1 + x * (W - 2)).toFixed(2);
+    const Y = (y: number) => (H - 1 - y * (H - 2)).toFixed(2);
+    d = `M${X(0)} ${Y(0)} C${X(bz[0])} ${Y(bz[1])}, ${X(bz[2])} ${Y(bz[3])}, ${X(1)} ${Y(1)}`;
+  } else if (easing.startsWith("linear(")) {
+    d = `M1 9 C4 -1, 6 3, 8 1.5 S11 1, 13 1`; // spring: overshoot and settle
+  } else if (easing.startsWith("steps")) {
+    d = `M1 9 H5 V5 H9 V1 H13`;
+  } else {
+    d = `M1 ${H - 1} L${W - 1} 1`;
+  }
+  return (
+    <svg width={W} height={H} style={{ flex: "none", overflow: "visible" }}>
+      <path d={d} fill="none" stroke="#71717a" strokeWidth={1.25} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// Small pill switch (speed, dials/timeline)
+function Segmented<T extends string | number>({ options, value, onChange, title }: {
+  options: { value: T; label: string }[];
+  value: T;
+  onChange: (v: T) => void;
+  title?: (v: T) => string;
+}) {
+  return (
+    <span style={{ display: "inline-flex", flex: "none", padding: 2, borderRadius: 7, backgroundColor: "rgba(255,255,255,0.05)" }}>
+      {options.map((o) => (
+        <button
+          key={String(o.value)}
+          title={title?.(o.value)}
+          onClick={() => onChange(o.value)}
+          {...(o.value === value ? {} : { "data-penseat-seg": "" })}
+          style={{
+            border: "none",
+            outline: "none",
+            cursor: "pointer",
+            height: 20,
+            padding: "0 7px",
+            borderRadius: 5,
+            fontFamily: "inherit",
+            fontSize: 10.5,
+            color: o.value === value ? "#f4f4f5" : "#71717a",
+            backgroundColor: o.value === value ? "rgba(255,255,255,0.1)" : "transparent",
+            transition: "color 150ms",
+          }}
+        >
+          {o.label}
+        </button>
+      ))}
     </span>
   );
 }
@@ -2168,6 +2418,30 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
       r.type === "track" ? r.short.length + (r.indent ? 2 : 0) : 0
     )
   );
+  // Solo objects open on dials; the timeline stays one switch away
+  const dialView = solo && !showTimeline;
+  const barY = 24;
+  // Dial rows: one per property with an amount dial (or the first track
+  // when nothing scales), computed up front so the body height is known
+  // in both views — switching Dials / Timeline must not move anything
+  type DialRow = { info: AnimInfo; idx: number; track: PropTrack | null; first: boolean; amp: boolean };
+  const dialRows: DialRow[] = !solo
+    ? []
+    : allInfos.flatMap((info, idx) => {
+        const amped = info.tracks.filter((track) => {
+          if (amplitudeNeutral(track) == null) return false;
+          // Nothing to scale if every keyframe sits at neutral
+          const n = amplitudeNeutral(track)!;
+          return baselineTrackValues(idx, track).some(
+            (raw) => scaleAbout(raw, n, 2) !== scaleAbout(raw, n, 1)
+          );
+        });
+        const shown = amped.length ? amped : [info.tracks[0] ?? null];
+        return shown.map((track, i) => ({ info, idx, track, first: i === 0, amp: amped.length > 0 }));
+      });
+  // One body height for both views: the dials' height (capped like the
+  // timeline's), and the timeline scrolls inside it when it runs longer
+  const soloBodyH = Math.min(TRACKS_MAX_H, DIAL_PAD + DIAL_HEAD_H + dialRows.length * DIAL_ROW_H);
   const labelWidth = Math.max(
     146,
     Math.min(155, Math.max(56, Math.ceil(labelChars * 6.7) + 2))
@@ -2219,10 +2493,10 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
           // Room for the lanes to breathe; capped so small windows keep a margin
           width: "min(720px, calc(100vw - 32px))",
           backgroundColor: PANEL_BG,
-          border: "1.5px solid rgba(255,255,255,0.25)",
-          boxShadow: "0 0 0 0.5px rgba(255,255,255,0.06), 0 4px 16px rgba(0,0,0,0.3)",
-          borderRadius: 12,
-          padding: "14px 18px",
+          border: "1px solid rgba(255,255,255,0.1)",
+          boxShadow: "0 12px 40px rgba(0,0,0,0.22), 0 2px 6px rgba(0,0,0,0.12)",
+          borderRadius: 14,
+          padding: "12px 18px 14px",
           fontFamily: "monospace",
           fontSize: 11,
           color: "#e4e4e7",
@@ -2230,9 +2504,14 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
           userSelect: "none",
         }}
       >
-        {/* Header: title · onion skin ····· check (when edited) · minimize · close */}
+        <style>{`
+          [data-penseat="player"] [data-penseat-dial]:hover { background-color: rgba(255,255,255,0.07) !important; }
+          [data-penseat="player"] [data-penseat-seg]:hover { color: #d4d4d8 !important; }
+          [data-penseat="player"] [data-penseat-play]:active { transform: scale(0.92); }
+        `}</style>
+        {/* Header: title · onion skin ····· view switch · check (when edited) · minimize · close */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-          <span style={{ color: "#71717a", overflow: "hidden", whiteSpace: "nowrap" }}>
+          <span style={{ color: "#d4d4d8", overflow: "hidden", whiteSpace: "nowrap" }}>
             {midTruncate(grab.label, 28)}
           </span>
           <button
@@ -2250,6 +2529,15 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
             {OnionIcon}
           </button>
           <span style={{ flex: 1 }} />
+          {solo && !minimized && (
+            <span style={{ fontFamily: SANS, marginRight: 4 }}>
+              <Segmented
+                options={[{ value: "dials", label: "Dials" }, { value: "timeline", label: "Timeline" }]}
+                value={showTimeline ? "timeline" : "dials"}
+                onChange={(v) => setShowTimeline(v === "timeline")}
+              />
+            </span>
+          )}
           {hasUncommitted && (
             <button
               aria-label="Commit timing edits"
@@ -2288,7 +2576,7 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
             height: 16,
             width: 1,
             backgroundColor: "#f4f4f5",
-            opacity: minimized ? 0 : 0.5,
+            opacity: minimized || dialView ? 0 : 0.5,
             transition: "opacity 200ms ease-out",
             pointerEvents: "none",
           }}
@@ -2299,6 +2587,8 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
         <div style={{ display: "flex", alignItems: "center", gap: LANE_GAP, paddingRight: gutter }}>
           <span
             style={{
+              // On the timeline this column lines up with the lane labels;
+              // dials have no lanes, so it just hugs its contents
               width: labelWidth,
               flexShrink: 0,
               display: "flex",
@@ -2309,9 +2599,9 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
             <button
               aria-label={playing ? "Pause" : "Play"}
               title={playing ? "Pause (K)" : "Play (K)"}
-              data-penseat-btn=""
+              data-penseat-play=""
               onClick={playPause}
-              style={{ ...btnStyle, color: "#f4f4f5" }}
+              style={{ ...btnStyle, borderRadius: 999, color: PANEL_BG, backgroundColor: "#f4f4f5", transition: "transform 100ms" }}
             >
               <PlayPauseIcon playing={playing} />
             </button>
@@ -2320,8 +2610,10 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
             </button>
             {/* Right-aligned in the column — hugs the timeline start.
                 Current time pops white; total duration stays quiet */}
-            <span style={{ color: "#71717a", whiteSpace: "nowrap", overflow: "hidden", marginLeft: "auto" }}>
-              <span style={{ color: "#f4f4f5" }}>{fmtTime(time)}</span>
+            <span style={{ color: "#52525b", fontSize: 11.5, whiteSpace: "nowrap", overflow: "hidden", marginLeft: "auto" }}>
+              <span style={{ color: "#e4e4e7" }}>
+                {span >= 1000 && time >= 1000 ? fmtTime(time).slice(0, -1) : fmtTime(time)}
+              </span>
               /{fmtTime(span)}
             </span>
           </span>
@@ -2385,53 +2677,40 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
                 />
               </span>
             ))}
-            {/* Same 1px stroke as the layer lanes — only the knob stays
-                loud, so it still reads as the one in charge */}
-            <div style={{ position: "absolute", left: 0, right: 0, top: 24, height: 1, backgroundColor: "#3f3f46" }} />
+            {/* Thin track, played part lit, and a slim bar for the playhead */}
+            <div style={{ position: "absolute", left: 0, right: 0, top: barY - 1, height: 2, borderRadius: 2, backgroundColor: "rgba(255,255,255,0.1)" }} />
             <div
               style={{
                 position: "absolute",
                 left: 0,
                 width: `${frac * 100}%`,
-                top: 24,
-                height: 1,
-                backgroundColor: ACCENT_DIM,
+                top: barY - 1,
+                height: 2,
+                borderRadius: 2,
+                backgroundColor: "rgba(255,255,255,0.5)",
               }}
             />
             <div
               style={{
                 position: "absolute",
                 left: `${frac * 100}%`,
-                top: 24.5,
-                transform: "translate(-50%, -50%)",
-                width: 11,
-                height: 11,
-                borderRadius: 999,
+                top: barY - 6,
+                marginLeft: -1,
+                width: 2,
+                height: 12,
+                borderRadius: 2,
                 backgroundColor: "#f4f4f5",
               }}
             />
           </div>
           {/* Chips-column slot on the transport row: slow-motion presets */}
-          <span style={{ width: EDIT_COL, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
-            {[0.25, 0.5, 1].map((v) => (
-              <button
-                key={v}
-                title={v === 1 ? "Normal speed" : `Slow motion — ${v}x speed`}
-                // Same quiet icon-button frame as play/restart; the active
-                // speed holds its fill, so it skips the shared hover rule
-                {...(speed === v ? {} : { "data-penseat-btn": "" })}
-                onClick={() => applySpeed(v)}
-                style={{
-                  ...btnStyle,
-                  fontSize: 9,
-                  ...(speed === v
-                    ? { color: "#f4f4f5", backgroundColor: "#3f3f46" }
-                    : {}),
-                }}
-              >
-                {String(v).replace("0.", ".")}x
-              </button>
-            ))}
+          <span style={{ width: EDIT_COL, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
+            <Segmented
+              options={[0.25, 0.5, 1].map((v) => ({ value: v, label: `${String(v).replace("0.", ".")}×` }))}
+              value={speed}
+              onChange={applySpeed}
+              title={(v) => (v === 1 ? "Normal speed" : `Slow motion, ${v}x speed`)}
+            />
           </span>
         </div>
 
@@ -2459,17 +2738,7 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
             transition: minimized ? "visibility 0s 200ms" : "visibility 0s",
           }}
         >
-        {solo && (
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 6, marginBottom: -6 }}>
-            <button
-              data-penseat-btn=""
-              onClick={() => setShowTimeline((t) => !t)}
-              style={{ ...btnStyle, width: "auto", height: 20, padding: "0 8px", fontSize: 9, color: "#71717a" }}
-            >
-              {showTimeline ? "dials" : "timeline"}
-            </button>
-          </div>
-        )}
+        {solo && <div style={{ height: 1, margin: "12px -18px 0", backgroundColor: "rgba(255,255,255,0.06)" }} />}
 
         {/* Layer tracks — hover a row to highlight its element on the page.
             Bleeds into the panel padding so the scrollbar sits at the panel
@@ -2484,7 +2753,7 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
             // box, so header hover pills need this room to reach left
             marginLeft: -18,
             paddingLeft: 18,
-            maxHeight: 190,
+            ...(solo ? { height: soloBodyH } : { maxHeight: TRACKS_MAX_H }),
             overflowY: "auto",
             // Reaching the list's end must not scroll the page
             overscrollBehavior: "contain",
@@ -2495,108 +2764,151 @@ export default function MotionPlayer({ grab, onClose, onSelectLayer, onCommit }:
           }}
         >
           <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: 8 }}>
-          {solo && !showTimeline ? (
-            /* ── Dial view — tune the motion, don't edit a timeline ── */
-            <div style={{ display: "flex", flexDirection: "column", gap: 14, padding: "6px 0 2px" }}>
-              {allInfos.map((info, idx) => (
-                <div key={idx} style={{ display: "flex", alignItems: "flex-end", gap: 16, flexWrap: "wrap" }}>
-                  {allInfos.length > 1 && (
-                    <span
-                      style={{
-                        alignSelf: "center",
-                        minWidth: 80,
-                        maxWidth: 140,
-                        color: "#71717a",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {info.name}
-                    </span>
-                  )}
-                  <DialField label="duration">
-                    <ScrubDial
-                      value={effDur(idx)}
-                      active={Math.round(effDur(idx)) !== Math.round(info.origDuration)}
-                      format={fmtTime}
-                      parse={parseDuration}
-                      onApply={(v) => applyDuration(idx, v)}
-                      min={50}
-                      max={30000}
-                      perPx={5}
-                    />
-                  </DialField>
-                  <DialField label="ease">
-                    <button
-                      title={`Easing: ${effEase(idx)} — click to change`}
-                      onClick={(e) => {
-                        const r = e.currentTarget.getBoundingClientRect();
-                        setEaseMenu((open) =>
-                          open?.idx === idx
-                            ? null
-                            : {
-                                idx,
-                                x: r.right,
-                                y: r.top - 6,
-                                custom: false,
-                                spring: edits.get(idx)?.spring ?? null,
-                                bezier: null,
-                              }
-                        );
-                      }}
-                      style={{
-                        ...dialBoxStyle,
-                        cursor: "pointer",
-                        color: effEase(idx) !== info.origEasing ? "#f4f4f5" : "#a1a1aa",
-                      }}
-                    >
-                      {easeLabel(effEase(idx))}
-                    </button>
-                  </DialField>
-                  {info.delay > 0 && (
-                    <DialField label="delay">
-                      <span style={{ ...dialBoxStyle, cursor: "default", color: "#71717a" }}>
-                        {fmtTime(info.delay)}
-                      </span>
-                    </DialField>
-                  )}
-                  {/* Amplitude — how far the motion goes, per property */}
-                  {info.tracks
-                    .filter((track) => {
-                      if (amplitudeNeutral(track) == null) return false;
-                      // Nothing to scale if every keyframe sits at neutral
-                      const n = amplitudeNeutral(track)!;
-                      return baselineTrackValues(idx, track).some(
-                        (raw) => scaleAbout(raw, n, 2) !== scaleAbout(raw, n, 1)
-                      );
-                    })
-                    .map((track) => {
-                      const k = amps.get(ampKey(idx, track)) ?? 1;
-                      return (
-                        <DialField key={track.prop} label={track.prop}>
-                          <ScrubDial
-                            value={Math.round(k * 100)}
-                            active={Math.round(k * 100) !== 100}
-                            format={(v) => `${v}%`}
-                            parse={(str) => {
-                              const n = parseFloat(str.replace("%", ""));
-                              return isFinite(n) ? n : null;
-                            }}
-                            onApply={(v) => applyAmplitude(idx, track, v / 100)}
-                            min={0}
-                            max={300}
-                            perPx={1}
-                          />
-                        </DialField>
-                      );
-                    })}
-                  {info.iterations === Infinity && (
-                    <span style={{ alignSelf: "center", color: "#52525b" }}>×∞</span>
-                  )}
+          {dialView ? (
+            /* ── Dial view — tune the motion, don't edit a timeline ──
+               One row per animated property: its curve over one cycle,
+               then duration, ease and amount. Labels sit once on top. */
+            (() => {
+              // Layer column matches the timeline's label column, so the
+              // curves start right under the scrubber, same as the lanes
+              const COLS = [labelWidth, 0, 58, 92, 112];
+              const cell = (i: number): React.CSSProperties =>
+                i === 1
+                  ? { flex: 1, minWidth: 60, display: "flex", alignItems: "center", marginLeft: LANE_GAP - 16 }
+                  : { width: COLS[i], flexShrink: 0, display: "flex", alignItems: "center", gap: 6, overflow: "hidden" };
+              const rowStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 16, height: DIAL_ROW_H };
+              return (
+                <div style={{ display: "flex", flexDirection: "column", paddingTop: DIAL_PAD }}>
+                  <div style={{ ...rowStyle, height: DIAL_HEAD_H, fontFamily: SANS, fontSize: 11, color: "#52525b" }}>
+                    {["Layer", "Motion", "Duration", "Ease", "Amount"].map((h, i) => (
+                      <span key={h} style={cell(i)}>{h}</span>
+                    ))}
+                  </div>
+                  {dialRows.map(({ info, idx, track, first, amp }) => {
+                    const effect = info.anim.effect;
+                    const timingEase = effect ? String(effect.getTiming().easing ?? "linear") : "linear";
+                    const liveKfs = effect instanceof KeyframeEffect ? effect.getKeyframes() : [];
+                    const snap = COMMITTED.get(info.anim) ?? FIRST_SEEN.get(info.anim);
+                    const cur = track ? sampleCurve(liveKfs, track, timingEase) : null;
+                    const base = track && snap ? sampleCurve(snap.keyframes, track, timingEase) : null;
+                    const edited = !!cur && !!base && cur.some((v, i) => Math.abs(v - base[i]) > 1e-3);
+                    const d = effDur(idx);
+                    const ct = Number(info.anim.currentTime ?? 0) - info.delay;
+                    const progress =
+                      ct <= 0 ? 0 : ct >= d * info.iterations ? 1 : (ct % d) / d;
+                    const layer = layers.find((l) => l.infos.includes(info)) ?? null;
+                    const k = track ? amps.get(ampKey(idx, track)) ?? 1 : 1;
+                    return (
+                      <div
+                        key={`${idx}:${track?.prop ?? ""}`}
+                        onMouseEnter={() => hoverLayer(layer)}
+                        onMouseLeave={() => hoverLayer(null)}
+                        style={rowStyle}
+                      >
+                        <span style={cell(0)}>
+                          {first && (
+                            <span style={{ color: "#a1a1aa", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {info.name}
+                            </span>
+                          )}
+                          {track && (
+                            <span style={{ fontFamily: SANS, fontSize: 11, color: "#52525b", whiteSpace: "nowrap" }}>
+                              {track.prop}
+                            </span>
+                          )}
+                        </span>
+                        <span style={cell(1)}>
+                          {cur && (
+                            <MotionCurve
+                              cur={cur}
+                              orig={edited ? base : null}
+                              progress={progress}
+                              onSeek={(p) => seek(info.delay + p * d)}
+                            />
+                          )}
+                        </span>
+                        <span style={{ ...cell(2), flexDirection: "column", alignItems: "flex-start", gap: 0 }}>
+                          {first && (
+                            <ScrubDial
+                              bare
+                              value={d}
+                              active={Math.round(d) !== Math.round(info.origDuration)}
+                              format={fmtTime}
+                              parse={parseDuration}
+                              onApply={(v) => applyDuration(idx, v)}
+                              min={50}
+                              max={30000}
+                              perPx={5}
+                            />
+                          )}
+                          {first && info.delay > 0 && (
+                            <span style={{ fontSize: 9.5, color: "#52525b", whiteSpace: "nowrap" }}>
+                              after {fmtTime(info.delay)}
+                            </span>
+                          )}
+                        </span>
+                        <span style={cell(3)}>
+                          {first && (
+                            <button
+                              title={`Easing: ${effEase(idx)}. Click to change`}
+                              data-penseat-dial=""
+                              onClick={(e) => {
+                                const r = e.currentTarget.getBoundingClientRect();
+                                setEaseMenu((open) =>
+                                  open?.idx === idx
+                                    ? null
+                                    : {
+                                        idx,
+                                        x: r.right,
+                                        y: r.top - 6,
+                                        custom: false,
+                                        spring: edits.get(idx)?.spring ?? null,
+                                        bezier: null,
+                                      }
+                                );
+                              }}
+                              style={{
+                                ...bareDialStyle,
+                                gap: 7,
+                                cursor: "pointer",
+                                color: effEase(idx) !== info.origEasing ? "#fafafa" : "#d4d4d8",
+                              }}
+                            >
+                              <EaseGlyph easing={effEase(idx)} />
+                              {easeLabel(effEase(idx))}
+                            </button>
+                          )}
+                        </span>
+                        <span style={{ ...cell(4), gap: 8 }}>
+                          {amp && track && (
+                            <>
+                              <AmountSlider
+                                value={Math.round(k * 100)}
+                                onApply={(v) => applyAmplitude(idx, track, v / 100)}
+                              />
+                              <ScrubDial
+                                bare
+                                value={Math.round(k * 100)}
+                                active={Math.round(k * 100) !== 100}
+                                format={(v) => `${v}%`}
+                                parse={(str) => {
+                                  const n = parseFloat(str.replace("%", ""));
+                                  return isFinite(n) ? n : null;
+                                }}
+                                onApply={(v) => applyAmplitude(idx, track, v / 100)}
+                                min={0}
+                                max={300}
+                                perPx={1}
+                              />
+                            </>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
-            </div>
+              );
+            })()
           ) : (
           <>
           {/* Single time indicator crossing every layer */}
